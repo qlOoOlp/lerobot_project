@@ -310,25 +310,27 @@ _(구현 예정 — umidiffusion config/modeling/processor. 아래는 확정된 
 
 **목표**: 한 데이터셋(depth 포함)으로 `use_depth` on/off 를 바꿔가며 학습·비교. lerobot 패치 없이.
 
-**원리**: depth 를 **`input_features` 에서 빼면** 모델(DiffusionPolicy)이 depth 인코더를 안 만들고 배치의 depth 를 **무시**. → 별도 필터/패치 불필요.
+**원리**: depth 를 **`input_features` 에서 빼면** 모델이 depth 인코더를 안 만들고 배치의 depth 를 **무시**. → 별도 필터/패치 불필요.
 
-**hook 위치**: `make_policy` 는 `input_features` 를 채운 뒤(factory.py:517) `validate_features` 를 **안 부르고** 바로 정책을 생성 → 필터는 **`UmiDiffusionPolicy.__init__` 의 `super()` 직전**이 정답(이때 input_features 세팅됨, 모델 미생성).
+**hook 위치**: `make_policy` 는 `input_features` 를 채운 뒤(factory.py:517) `validate_features` 를 **안 부르고** 바로 정책을 생성 → 필터는 **`UmiDiffusionPolicy.__init__` 맨 앞**이 정답(이때 input_features 세팅됨, `DiffusionModel(config)` 이 인코더를 만들기 전).
 
 **3 조각**
 ```python
 # configuration_umidiffusion.py — 필터 로직 한 곳 (idempotent)
-DEPTH_KEY = "observation.images.depth"
-class UmiDiffusionConfig(DiffusionConfig):
+DEPTH_KEY = keys.DEPTH_KEY
+class UmiDiffusionConfig(PreTrainedConfig):        # ← 벤더링 사본. 부록 D.7
     use_depth: bool = True
     def apply_depth_gate(self):
         if not self.use_depth and self.input_features and DEPTH_KEY in self.input_features:
             self.input_features = {k: v for k, v in self.input_features.items() if k != DEPTH_KEY}
 
 # modeling_umidiffusion.py — 모델 빌드 전 적용
-class UmiDiffusionPolicy(DiffusionPolicy):
-    def __init__(self, config, dataset_stats=None):
-        config.apply_depth_gate()      # super() 전!
-        super().__init__(config, dataset_stats)
+class UmiDiffusionPolicy(PreTrainedPolicy):        # ← 벤더링 사본. 부록 D.7
+    def __init__(self, config, **kwargs):
+        config.apply_depth_gate()      # 맨 앞! DiffusionModel(config) 전
+        super().__init__(config)
+        config.validate_features()
+        ...
 
 # processor_umidiffusion.py — 프로세서도 동일 게이트 (순서 무관)
 def make_umidiffusion_pre_post_processors(config, dataset_stats=None):

@@ -29,8 +29,8 @@ lerobot_share/
 │   │           └── canonical_ee10_se3.py  #   그 표현의 codec (rot6d↔R, pose9d↔T) ≈ utils/rotation.py
 │   ├── policies/umidiffusion/lerobot_policy_umidiffusion/   ★ 배포판 — 플러그인 (자동탐색)
 │   │   └── src/lerobot_policy_umidiffusion/
-│   │       ├── configuration_umidiffusion.py  #   UmiDiffusionConfig  @register_subclass
-│   │       ├── modeling_umidiffusion.py       #   UmiDiffusionPolicy(DiffusionPolicy)
+│   │       ├── configuration_umidiffusion.py  #   UmiDiffusionConfig(PreTrainedConfig) @register_subclass
+│   │       ├── modeling_umidiffusion.py       #   UmiDiffusionPolicy(PreTrainedPolicy) — lerobot diffusion 벤더링
 │   │       ├── steps.py                       #   런타임 anchor-relative 변환 (순수 로직)
 │   │       └── processor_umidiffusion.py      #   pre/post 파이프라인 조립
 │   ├── envs/metaworld/canonical.py   # env 어댑터 — 수집·rollout 공유(train==inference)
@@ -125,7 +125,8 @@ lerobot-train --help | grep -A2 "policy.type"                                   
 예) raw 데이터 인스펙터 / metaworld 수집:
 ```bash
 python custom/scripts/data_processing/raw_inspect.py --raw-root <dataset> --format lerobot_dataset
-python custom/scripts/sim/collect_metaworld.py --output-root ~/datasets/metaworld_canonical --num-episodes 300
+python custom/scripts/sim/collect_metaworld.py \
+    --output-root ~/datasets/metaworld_canonical/pick_place_v3_bin --n-episodes 300
 ```
 
 ## 트러블슈팅
@@ -146,4 +147,17 @@ python custom/scripts/sim/collect_metaworld.py --output-root ~/datasets/metaworl
 
 ## 라이선스 / 출처
 
-lerobot 은 별도 clone 이며 Apache-2.0 (HuggingFace). 이 repo 는 그 위의 커스텀 확장 코드만 포함한다.
+lerobot 은 별도 clone 이며 Apache-2.0 (HuggingFace). 이 repo 는 그 위의 커스텀 확장 코드를 포함한다.
+
+**벤더링 고지** — 아래 2개 파일은 lerobot **v0.4.4 의 diffusion 정책을 복사**한 것이다 (Apache-2.0,
+원 저작권: Columbia Artificial Intelligence, Robotics Lab & The HuggingFace Inc. team — 라이선스 헤더 보존):
+
+| 우리 파일 | 원본 (lerobot v0.4.4) |
+|---|---|
+| `custom/policies/umidiffusion/.../configuration_umidiffusion.py` | `src/lerobot/policies/diffusion/configuration_diffusion.py` |
+| `custom/policies/umidiffusion/.../modeling_umidiffusion.py` | `src/lerobot/policies/diffusion/modeling_diffusion.py` |
+
+각 파일 상단의 **출처 블록**에 원본 경로·버전·원본과의 차이·재동기화 방법이 적혀 있다.
+**상속이 아니라 복사인 이유**는 refactoring.md **부록 D.7** (요약: lerobot 의 `make_pre_post_processors` 가
+`isinstance(cfg, DiffusionConfig)` 로 분기해 커스텀 프로세서를 조용히 가로챈다. 공식 규약은
+`PreTrainedConfig`/`PreTrainedPolicy` 상속이며, 공식 예제 `lerobot_policy_ditflow` 도 그렇게 한다).
