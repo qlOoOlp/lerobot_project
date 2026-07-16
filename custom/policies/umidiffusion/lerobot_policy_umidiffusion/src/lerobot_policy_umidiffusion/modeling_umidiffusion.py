@@ -68,7 +68,6 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from torch import Tensor, nn
 
-from .configuration_umidiffusion import UmiDiffusionConfig
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.utils import (
     get_device_from_parameters,
@@ -77,6 +76,8 @@ from lerobot.policies.utils import (
     populate_queues,
 )
 from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
+
+from .configuration_umidiffusion import UmiDiffusionConfig
 
 
 class UmiDiffusionPolicy(PreTrainedPolicy):
