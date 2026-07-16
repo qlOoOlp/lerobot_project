@@ -259,22 +259,22 @@ output_steps = [Unnormalizer, Device(cpu)]
 > lerobot_hong `custom/scripts/sim/rollout_metaworld_mypolicy.py:83-98` 이 정확히 이 형태다.
 > 우리 step 의 `ndim != 3` ValueError 가 이 계약을 **강제**한다 — 어기면 조용히 틀리는 대신 터진다.
 > (관측 히스토리 버퍼는 Phase 7 의 `runtime_buffer` 와 같은 물건 — 그때 공유 검토)
-4. [ ] **2-4 표현 codec** — `schemas/canonical_ee10_se3.py`: `rot6d↔R`, `pose9d↔transform`, `invert_transform`, `relative_transform` (torch, 배치 `...`)
+4. [x] **2-4 표현 codec** ✅ (2026-07-17) — `schemas/canonical_ee10_se3.py`: `rot6d↔R`, `pose9d↔transform`, `invert_transform`, `relative_transform` (torch, 배치 `...`)
    - 배우는 것: rot6d 를 쓰는 이유(연속성), **SE3 역변환은 `R^T`**(일반 `inv` 금지 — lerobot_hong 이 그 실수), 좌표계 상쇄
    - **표현 옆에 두는 이유·lerobot_hong 중복 증거**: 부록 D.5
    - 검증(**의존성 0 단독**): `invert(T)@T == I` · `R→rot6d→R == R`(**비대칭 회전으로!** 항등행렬은 행/열이 같아 안 걸림) · **좌표계 불변성** `(T@a)⁻¹@(T@b) == a⁻¹@b`
-5. [ ] **2-5 step 내부** — 2-3 의 껍데기를 codec 으로 채움
+5. [x] **2-5 step 내부** ✅ (2026-07-17) — 2-3 의 껍데기를 codec 으로 채움
    - 배우는 것: **앵커 의미** — 왜 `state[:,-1]` 인지, 왜 마지막 프레임이 항등이 되는지(정보량 0이지만 정상)
    - **pose 9D 만 변환, gripper 1D 는 그대로** / **차원 유지** 10D→10D (§9.4)
    - ⚠ **`action` 없으면 skip** — eval/추론 raw 관측엔 action 이 없음 (§9.3)
    - 검증: 2-3 항등 대비 **값이 바뀌는지**, gripper 는 **불변**인지
-6. [ ] **2-6 역변환** — `decode_policy_action(action, anchor_state, action_pose_repr)`
+6. [x] **2-6 역변환** ✅ (2026-07-17) — `decode_policy_action(action, anchor_state, action_pose_repr)`
    - **정책 relative 출력 → 절대 canonical**. `relative`: `base @ action` / `delta`: 누적 적분
    - **파이프라인 밖**: `policy_post` 는 `PolicyAction` 만 받아 **앵커 접근 불가** → 원본 UMI(`get_real_umi_action`)·lerobot_hong(`decode_policy_action`, 호출부 5곳) 모두 추론 루프가 직접 호출
    - ⚠ **없으면 Phase 5 가 통째로 틀린 명령을 냄**
    - forward step 과 **같은 파일**에 둔다 — 떨어뜨리면 갈라져도 모름(원본 UMI 가 그렇게 깨짐)
    - 검증: **왕복** `decode(forward(a, anchor), anchor) == a` (relative/delta **둘 다**)
-7. [ ] **2-7 depth 게이트** — `apply_depth_gate()`(config) + `DropObservationKeysProcessorStep`(런타임 절반)
+7. [x] **2-7 depth 게이트** ✅ (2026-07-17) — `apply_depth_gate()`(config) + `DropObservationKeysProcessorStep`(런타임 절반)
    - hook 위치: `UmiDiffusionPolicy.__init__` 의 **`super()` 직전** / **idempotent** 필수
    - `normalization_mapping`: `VISUAL=MEAN_STD`, **`STATE=IDENTITY`, `ACTION=IDENTITY`**
      - **유일한 근거 = dev_plan §11**: canonical stats 로 relative 를 정규화하면 **표현공간 불일치**

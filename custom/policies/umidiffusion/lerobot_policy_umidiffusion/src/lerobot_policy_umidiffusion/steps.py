@@ -50,7 +50,15 @@ def _split_pose_and_gripper(value: torch.Tensor, name: str) -> tuple[torch.Tenso
         (GRIPPER_AXES=("gripper",) 콤마, state4[..., 3:4] 와 같은 함정)
       - trailing dim 이 sch.STATE_DIM 인지 검증하고 아니면 ValueError.
     """
-    ...  # 구현 ①
+    if value.shape[-1] != sch.STATE_DIM:
+        raise ValueError(
+            f"Expected `{name}` trailing dim {sch.STATE_DIM}, got {tuple(value.shape)}."
+        )
+    pose = value[..., : sch.POSE_DIM]
+    # ★ `[..., sch.POSE_DIM:]` (슬라이스) — `[..., sch.POSE_DIM]` (정수 인덱스) 이면 축이 사라져
+    #   (..., ) 가 되고, 나중에 cat 할 때 shape 이 안 맞는다.
+    gripper = value[..., sch.POSE_DIM :]
+    return pose, gripper
 
 
 @ProcessorStepRegistry.register("canonical_pose_to_relative_observation")
@@ -108,8 +116,25 @@ class CanonicalPoseToRelativeObservationStep(ProcessorStep):
                 f"Expected `{self.state_key}` trailing dim {sch.STATE_DIM}, got {tuple(state.shape)}."
             )
 
-        # ── 2-5 에서 여기에 anchor-relative 변환이 들어온다. 지금은 항등(pass-through). ──
-        return transition
+        pose, gripper = _split_pose_and_gripper(state, self.state_key)
+
+        state_transform = pose9d_to_transform(pose)                     # (B, T, 4, 4)
+        # ★ `[:, -1:]` (슬라이스) 로 T 축을 **유지**한 뒤 expand. `[:, -1]` 이면 축이 사라져
+        #   (B, 4, 4) 가 되고 expand_as 가 깨진다.
+        anchor_transform = state_transform[:, -1:, :, :].expand_as(state_transform)
+        relative = relative_transform(anchor_transform, state_transform)
+
+        # 그리퍼는 좌표계와 무관하므로 원본 그대로 이어붙인다 ("0.7만큼 열려라"는 내가
+        # 어디 있든 같은 뜻). 이래야 10D -> 10D 로 차원이 유지된다.
+        new_state = torch.cat((transform_to_pose9d(relative), gripper), dim=-1)
+
+        # transition/observation 을 in-place 로 고치지 않는다 — 호출자가 원본을 들고 있을 수 있고,
+        # lerobot 의 다른 step 들도 copy 패턴을 쓴다(normalize_processor.py:446).
+        new_observation = dict(observation)
+        new_observation[self.state_key] = new_state
+        new_transition = transition.copy()
+        new_transition[TransitionKey.OBSERVATION] = new_observation
+        return new_transition
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
@@ -138,13 +163,13 @@ class CanonicalPoseToActionPoseReprStep(ProcessorStep):
         delta    : d_0 = a_0 - anchor, d_i = a_i - a_{i-1}   연쇄 -> 오차 누적
       기본값은 relative.
 
-    ■ ★★ 학습/추론 대칭 (원본 UMI 의 버그를 피하는 지점)
+    ■ 학습/추론 대칭 (원본 UMI 의 버그를 피하는 지점)
       원본 umi_dataset.py:349 는 액션 변환에 `pose_rep=self.obs_pose_repr` 을 넘긴다
       (action_pose_repr 이어야 함). 기본값이 둘 다 relative 라 안 드러나지만
       action_pose_repr="delta" 로 두면 **학습=relative / 추론=delta** 로 조용히 갈라진다.
       => 이 step 과 decode_policy_action() 이 **반드시 같은 action_pose_repr** 을 받아야 한다.
 
-    ■ ★ action 이 없으면 그냥 통과 (dev_plan §9.3)
+    ■ action 이 없으면 그냥 통과 (dev_plan §9.3)
       학습 배치엔 action 이 있지만 **eval/추론 관측엔 없다**. `if action is None: return`.
       이걸 빠뜨리면 추론 때 터진다.
 
@@ -171,13 +196,10 @@ class CanonicalPoseToActionPoseReprStep(ProcessorStep):
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         action = transition.get(TransitionKey.ACTION)
         if action is None:
-            # ★ 추론엔 action 이 없다 (정답을 모르니 정책을 돌린다). 빠뜨리면 Phase 5 에서 터진다.
             return transition
 
         observation = transition.get(TransitionKey.OBSERVATION)
         if not isinstance(observation, dict) or self.state_key not in observation:
-            # 앵커를 '관측'에서 가져오므로 observation 이 없으면 변환 자체가 불가능하다.
-            # 관측 step 과 달리 조용히 통과시키면 안 된다 — 액션만 절대로 남아 학습이 조용히 깨진다.
             raise ValueError(
                 f"`{type(self).__name__}` needs `{self.state_key}` in the observation to build the "
                 f"anchor, but got {type(observation).__name__}. It must run inside the policy "
@@ -201,8 +223,43 @@ class CanonicalPoseToActionPoseReprStep(ProcessorStep):
                 f"`action` has {action.shape[0]}."
             )
 
-        # ── 2-5 에서 여기에 relative/delta 변환이 들어온다. 지금은 항등(pass-through). ──
-        return transition
+        action_pose, action_gripper = _split_pose_and_gripper(action, "action")
+        state_pose, _ = _split_pose_and_gripper(state, self.state_key)
+
+        # ★ 앵커는 **관측**의 마지막 프레임. 액션의 첫 프레임이 아니다 —
+        #   그러면 관측과 기준이 갈라져 정책이 배울 게 없어진다.
+        anchor_transform = pose9d_to_transform(state_pose[:, -1, :])    # (B, 4, 4)
+        action_transform = pose9d_to_transform(action_pose)             # (B, H, 4, 4)
+
+        if self.action_pose_repr == "relative":
+            # a_i' = inv(anchor) @ a_i — 전부 같은 앵커라 오차가 전파되지 않는다.
+            # 원본 UMI pose_repr_util.py:63-64 `'relative'` 와 동일.
+            out_transform = relative_transform(
+                anchor_transform.unsqueeze(1).expand_as(action_transform), action_transform
+            )
+        else:  # "delta"
+            # ★ delta 는 SE(3) 합성이 **아니다** — 원본 UMI(pose_repr_util.py:65-77)가
+            #   위치/회전을 분리해 정의했으므로 그대로 따른다:
+            #       위치: np.diff([base_t, t_0..t_{H-1}])  =>  t_i - t_{i-1}   (뺄셈)
+            #       회전: R_i @ inv(R_{i-1})                                    (곱셈)
+            #   위치는 뺄셈인데 회전은 곱셈인 비대칭이 이상해 보여도, decode_policy_action 과
+            #   짝이 맞아야 하므로 원본을 따른다. 둘이 갈라지면 조용히 깨진다.
+            prev = torch.cat((anchor_transform.unsqueeze(1), action_transform[:, :-1]), dim=1)
+            delta_t = action_transform[..., :3, 3] - prev[..., :3, 3]
+            delta_r = torch.matmul(
+                action_transform[..., :3, :3], prev[..., :3, :3].transpose(-1, -2)
+            )
+            out_transform = action_transform.new_zeros(action_transform.shape)
+            out_transform[..., :3, :3] = delta_r
+            out_transform[..., :3, 3] = delta_t
+            out_transform[..., 3, 3] = 1.0
+
+        # 그리퍼는 변환하지 않고 그대로 이어붙인다 (좌표계와 무관).
+        new_action = torch.cat((transform_to_pose9d(out_transform), action_gripper), dim=-1)
+
+        new_transition = transition.copy()
+        new_transition[TransitionKey.ACTION] = new_action
+        return new_transition
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
@@ -252,7 +309,72 @@ def decode_policy_action(
       - 입력 ndim 에 따라 unsqueeze 했다가 **끝에 원래 shape 로 되돌릴 것**.
       - 회귀 테스트 필수: decode(forward(a, anchor), anchor) == a  (relative/delta 둘 다)
     """
-    ...  # 구현 ⑤
+    if action_pose_repr not in {"relative", "delta"}:
+        raise ValueError(
+            f'`action_pose_repr` must be one of {{"relative", "delta"}}. Got {action_pose_repr}.'
+        )
+
+    # 입력 shape 을 (B, H, 10) 으로 통일한 뒤, 마지막에 원래 모양으로 되돌린다.
+    # rollout 은 (H,10) 을, 단일 스텝 경로는 (10,) 를 넘길 수 있어서 셋 다 받아야 한다.
+    original_ndim = action.ndim
+    if original_ndim == 1:
+        action = action[None, None]        # (10,)     -> (1, 1, 10)
+    elif original_ndim == 2:
+        action = action[None]              # (H, 10)   -> (1, H, 10)
+    elif original_ndim != 3:
+        raise ValueError(f"Expected action ndim in {{1, 2, 3}}, got {tuple(action.shape)}.")
+
+    if anchor_state.ndim == 1:
+        anchor_state = anchor_state[None]  # (10,) -> (1, 10)
+    elif anchor_state.ndim != 2:
+        raise ValueError(f"Expected anchor_state ndim in {{1, 2}}, got {tuple(anchor_state.shape)}.")
+
+    if anchor_state.shape[0] != action.shape[0]:
+        raise ValueError(
+            f"Batch size mismatch: anchor_state has {anchor_state.shape[0]}, "
+            f"action has {action.shape[0]}."
+        )
+
+    action_pose, action_gripper = _split_pose_and_gripper(action, "action")
+    anchor_pose, _ = _split_pose_and_gripper(anchor_state, "anchor_state")
+
+    anchor_transform = pose9d_to_transform(anchor_pose)      # (B, 4, 4)
+    action_transform = pose9d_to_transform(action_pose)      # (B, H, 4, 4)
+
+    if action_pose_repr == "relative":
+        # forward 가 inv(anchor) @ a 였으므로 역은 anchor @ a'.
+        # 원본 UMI pose_repr_util.py:94-95 backward `'relative'` 와 동일.
+        decoded = torch.matmul(anchor_transform.unsqueeze(1), action_transform)
+    else:  # "delta"
+        # 원본 UMI pose_repr_util.py:97-106 backward `'delta'`:
+        #   위치: cumsum(delta_t) + anchor_t          (forward 의 diff 를 되돌림)
+        #   회전: R_i = delta_R_i @ R_{i-1},  R_{-1} = anchor_R   (순차 곱)
+        position = torch.cumsum(action_transform[..., :3, 3], dim=1) + anchor_transform[
+            ..., :3, 3
+        ].unsqueeze(1)
+
+        # ★ 회전은 벡터화가 안 된다 — R_i 가 R_{i-1} 에 의존하는 **연쇄**라서.
+        #   이게 delta 가 relative 보다 오차에 취약한 이유이기도 하다(오차가 누적된다).
+        rotations = []
+        current = anchor_transform[..., :3, :3]              # (B, 3, 3)
+        for i in range(action_transform.shape[1]):
+            current = torch.matmul(action_transform[:, i, :3, :3], current)
+            rotations.append(current)
+        rotation = torch.stack(rotations, dim=1)             # (B, H, 3, 3)
+
+        decoded = action_transform.new_zeros(action_transform.shape)
+        decoded[..., :3, :3] = rotation
+        decoded[..., :3, 3] = position
+        decoded[..., 3, 3] = 1.0
+
+    out = torch.cat((transform_to_pose9d(decoded), action_gripper), dim=-1)
+
+    # 들어온 모양 그대로 돌려준다.
+    if original_ndim == 1:
+        return out[0, 0]
+    if original_ndim == 2:
+        return out[0]
+    return out
 
 
 __all__ = [

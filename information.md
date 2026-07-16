@@ -384,6 +384,27 @@ relative_transform(anchor, state) = anchor⁻¹ @ state
 ```
 **오프라인 좌표계가 상쇄**되므로 metaworld(월드 절대)·UMI(episode-start 상대)가 **정책에겐 같은 의미**. "정책이 데이터에 의존하면 안 된다"가 이 한 줄로 보장됨.
 
+> **실측 검증 (2026-07-17, 2-4/2-5)**: 임의의 월드 프레임 `W` 를 곱해도 결과 동일 —
+> `(W@a)⁻¹(W@b) == a⁻¹b` 를 랜덤 SE(3) 64개로 확인.
+>
+> ### ⚠ 그런데 이 보장은 **`relative` 에만** 해당한다 — `delta` 는 아니다
+> | | 평행이동 | **회전** | 둘 다 |
+> |---|---|---|---|
+> | `relative` | 불변 | **불변** | **불변** ✅ |
+> | `delta` | 불변 | **★ 변함** | **★ 변함** ❌ |
+>
+> 원본 UMI 의 `delta` 정의가 **위치를 월드 프레임에서 뺄셈**하기 때문이다(`pose_repr_util.py:65-77`:
+> `out_pos = np.diff([base_t, t_0..])`). 월드가 회전하면 그 변위 벡터도 같이 회전한다:
+> ```
+> delta_t_i = t_i − t_{i−1}        →  W 회전 시  R_W @ (t_i − t_{i−1})     ← 변함
+> delta_R_i = R_i @ R_{i−1}ᵀ       →  W 회전 시  R_W @ delta_R_i @ R_Wᵀ    ← 켤레, 변함
+> ```
+> 구현 버그가 아니라 **정의 자체의 성질**이다(SE(3) 합성이 아니라 위치/회전 분리 정의).
+>
+> **우리에겐 문제없다** — `obs_pose_repr` 은 `"relative"` 만 허용하고 `action_pose_repr` 기본값도
+> `relative` 다. 다만 **`action_pose_repr="delta"` 로 바꾸면 UMI↔metaworld 간 프레임 비의존성이
+> 깨진다**. delta 를 쓸 일이 생기면 이 표를 먼저 볼 것. (delta 는 오차 누적 문제도 있다 — steps.py)
+
 ### 정규화가 IDENTITY 인 이유 (dev_plan §11)
 > *"dataset stats 는 canonical 기준인데 런타임이 relative 로 바꾼다 → canonical stats 를 그대로 쓰면 **표현 공간이 안 맞을 수 있다**"*
 

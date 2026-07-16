@@ -52,7 +52,24 @@ def rot6d_to_rotation_matrix(rot6d: torch.Tensor) -> torch.Tensor:
       - 왕복: R -> rot6d -> R 은 **항등**(직교행렬이므로). 반대로 임의의 6D -> R -> 6D 는
         항등이 **아니다**(정규화되므로). 테스트는 R 기준 왕복으로 짤 것.
     """
-    ...  # 구현 ①
+    if rot6d.shape[-1] != 6:
+        raise ValueError(f"Expected rot6d trailing dim 6, got {tuple(rot6d.shape)}.")
+
+    a1, a2 = rot6d[..., :3], rot6d[..., 3:]
+
+    # eps 를 둔다: 학습 중 a1≈0 이나 a1∥a2 는 사실상 안 생기지만, 생기면 NaN 이 되어
+    # loss 전체를 오염시키고 원인 추적이 매우 어렵다. eps 는 정상 입력엔 영향이 없다.
+    b1 = torch.nn.functional.normalize(a1, dim=-1, eps=1e-8)
+    # Gram-Schmidt: a2 에서 b1 성분을 빼면 b1 과 직교. keepdim 으로 (..., 1) 을 유지해야
+    # broadcast 가 맞는다 — (...,) 로 줄면 마지막 축이 3과 곱해져 조용히 틀린다.
+    b2 = torch.nn.functional.normalize(
+        a2 - (b1 * a2).sum(dim=-1, keepdim=True) * b1, dim=-1, eps=1e-8
+    )
+    b3 = torch.cross(b1, b2, dim=-1)
+
+    # ★ dim=-1 로 쌓아야 b1,b2,b3 가 **열**이 된다. dim=-2 면 행이 되어 전치된 R 이 나오고,
+    #   단위행렬 테스트로는 안 잡힌다(행=열이므로). 비대칭 회전으로 검증할 것.
+    return torch.stack((b1, b2, b3), dim=-1)
 
 
 def rotation_matrix_to_rot6d(rotation_matrix: torch.Tensor) -> torch.Tensor:
@@ -65,7 +82,15 @@ def rotation_matrix_to_rot6d(rotation_matrix: torch.Tensor) -> torch.Tensor:
         **테스트가 안 걸린다** — 비대칭 회전으로 검증할 것.
       - 결과 순서는 [c1(3), c2(3)] = rot6d_0..5, canonical_ee10.POSE_AXES 와 일치해야 함.
     """
-    ...  # 구현 ②
+    if rotation_matrix.shape[-2:] != (3, 3):
+        raise ValueError(f"Expected rotation matrix (..., 3, 3), got {tuple(rotation_matrix.shape)}.")
+
+    # ★ [..., :, 0] = 0번째 **열**. [..., 0, :] 은 0번째 **행**이라 전치된 값이 나온다.
+    #   마지막 두 축이 (row, col) 이므로 헷갈리기 쉽고, 단위행렬로는 구분이 안 된다.
+    c1 = rotation_matrix[..., :, 0]
+    c2 = rotation_matrix[..., :, 1]
+    # c3 는 버린다 — R 이 직교행렬이라 c1 x c2 로 복원된다. 정보 손실 0.
+    return torch.cat((c1, c2), dim=-1)
 
 
 def pose9d_to_transform(pose9d: torch.Tensor) -> torch.Tensor:
@@ -84,7 +109,22 @@ def pose9d_to_transform(pose9d: torch.Tensor) -> torch.Tensor:
       - 마지막 행은 [0,0,0,1]. zeros_like 로 만들고 [..., 3, 3] = 1 을 빠뜨리면
         역변환·곱셈이 조용히 망가진다.
     """
-    ...  # 구현 ③
+    if pose9d.shape[-1] != sch.POSE_DIM:
+        raise ValueError(
+            f"Expected pose9d trailing dim {sch.POSE_DIM}, got {tuple(pose9d.shape)}. "
+            f"Passing the full {sch.STATE_DIM}D canonical state (with gripper) is a common mistake — "
+            f"split it first."
+        )
+
+    rotation = rot6d_to_rotation_matrix(pose9d[..., sch.POSE_DIM - 6 :])
+    translation = pose9d[..., :3]
+
+    # new_zeros: dtype/device 를 입력에서 그대로 물려받는다 (torch.zeros 는 CPU/float32 로 새로 만듦).
+    transform = pose9d.new_zeros((*pose9d.shape[:-1], 4, 4))
+    transform[..., :3, :3] = rotation
+    transform[..., :3, 3] = translation   # t 는 마지막 '열'의 앞 3개
+    transform[..., 3, 3] = 1.0            # ★ 빠뜨리면 동차좌표가 깨져 곱셈이 조용히 틀린다
+    return transform
 
 
 def transform_to_pose9d(transform: torch.Tensor) -> torch.Tensor:
@@ -96,7 +136,12 @@ def transform_to_pose9d(transform: torch.Tensor) -> torch.Tensor:
       - transform[..., :3, 3] 은 **열벡터 t**(마지막 열의 앞 3개). [..., 3, :3] 이 아니다.
       - 이 함수 + pose9d_to_transform 의 왕복이 항등이어야 한다 → 회귀 테스트 필수.
     """
-    ...  # 구현 ④
+    if transform.shape[-2:] != (4, 4):
+        raise ValueError(f"Expected transform (..., 4, 4), got {tuple(transform.shape)}.")
+
+    translation = transform[..., :3, 3]                              # 마지막 '열'의 앞 3개
+    rot6d = rotation_matrix_to_rot6d(transform[..., :3, :3])
+    return torch.cat((translation, rot6d), dim=-1)
 
 
 def invert_transform(transform: torch.Tensor) -> torch.Tensor:
@@ -115,7 +160,22 @@ def invert_transform(transform: torch.Tensor) -> torch.Tensor:
       - zeros_like 로 만들고 [..., 3, 3] = 1.0 을 반드시 채울 것.
       - 검증: invert_transform(T) @ T == I (배치 전체에서)
     """
-    ...  # 구현 ⑤
+    if transform.shape[-2:] != (4, 4):
+        raise ValueError(f"Expected transform (..., 4, 4), got {tuple(transform.shape)}.")
+
+    rotation = transform[..., :3, :3]
+    translation = transform[..., :3, 3]
+
+    # R^T. transpose(-1, -2) 는 마지막 두 축만 바꾸므로 선행 배치축은 그대로 산다.
+    rotation_inv = rotation.transpose(-1, -2)
+    # t_inv = -R^T @ t. t 를 (..., 3, 1) 로 세워 행렬곱한 뒤 다시 (..., 3) 으로 눕힌다.
+    translation_inv = -torch.matmul(rotation_inv, translation.unsqueeze(-1)).squeeze(-1)
+
+    inverse = transform.new_zeros(transform.shape)
+    inverse[..., :3, :3] = rotation_inv
+    inverse[..., :3, 3] = translation_inv
+    inverse[..., 3, 3] = 1.0              # ★ 여기도 빠뜨리기 쉽다
+    return inverse
 
 
 def relative_transform(anchor_transform: torch.Tensor, target_transform: torch.Tensor) -> torch.Tensor:
@@ -136,7 +196,12 @@ def relative_transform(anchor_transform: torch.Tensor, target_transform: torch.T
       - anchor == target 이면 결과는 **항등**. 그래서 관측 히스토리의 마지막 프레임은
         변환 후 항상 (0,0,0, 1,0,0,0,1,0) 이 된다 — 정보량 0이지만 정상.
     """
-    ...  # 구현 ⑥
+    if anchor_transform.shape != target_transform.shape:
+        raise ValueError(
+            f"anchor {tuple(anchor_transform.shape)} and target {tuple(target_transform.shape)} "
+            f"must have the same shape — expand the anchor at the call site."
+        )
+    return torch.matmul(invert_transform(anchor_transform), target_transform)
 
 
 __all__ = [

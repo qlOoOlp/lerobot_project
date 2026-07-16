@@ -62,7 +62,18 @@ class DropObservationKeysProcessorStep(ProcessorStep):
         self.keys = tuple(self.keys)
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
-        ...  # 구현 ①
+        observation = transition.get(TransitionKey.OBSERVATION)
+        if not isinstance(observation, dict):
+            return transition
+
+        if not any(key in observation for key in self.keys):
+            # 제거할 게 없으면 transition 을 **그대로** 반환 — 불필요한 dict 복사를 만들지 않는다.
+            return transition
+
+        new_observation = {k: v for k, v in observation.items() if k not in self.keys}
+        new_transition = transition.copy()
+        new_transition[TransitionKey.OBSERVATION] = new_observation
+        return new_transition
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
@@ -112,6 +123,11 @@ def make_umidiffusion_pre_post_processors(
       - post pipeline 은 to_transition/to_output 을 지정해야 PolicyAction <-> transition 변환이 된다.
     """
 
+    # depth 게이트 **1겹**: input_features 에서 depth 를 뺀다 -> Normalizer 의 features 가
+    # 자동으로 depth 를 제외하고, 모델도 인코더를 안 만든다(정책 __init__ 이 또 부른다 — idempotent).
+    # 정책과 프로세서 중 누가 먼저 불릴지 보장이 없어 양쪽에서 부른다.
+    config.apply_depth_gate()
+
     input_steps = [
         RenameObservationsProcessorStep(rename_map={}),
         AddBatchDimensionProcessorStep(),
@@ -130,6 +146,12 @@ def make_umidiffusion_pre_post_processors(
             stats=dataset_stats,
         ),
     ]
+    # depth 게이트 **2겹째**: 관측 dict 에서 실제로 제거해 배치·GPU 로 올라가지 않게 한다.
+    # 1겹(config)만으로도 '정확성'은 확보되지만(모델이 인코더를 안 만듦), 배치엔 여전히
+    # depth 텐서가 실려 GPU 로 전송된다 -> 낭비. 그래서 index 1 = **Rename 뒤 / AddBatch 앞**.
+    if not config.use_depth:
+        input_steps.insert(1, DropObservationKeysProcessorStep())
+
     output_steps = [
         UnnormalizerProcessorStep(
             features=config.output_features, norm_map=config.normalization_mapping, stats=dataset_stats

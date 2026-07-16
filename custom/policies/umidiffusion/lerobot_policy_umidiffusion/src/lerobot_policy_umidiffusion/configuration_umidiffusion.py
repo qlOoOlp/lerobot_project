@@ -367,4 +367,13 @@ class UmiDiffusionConfig(PreTrainedConfig):
           - ⚠ depth 게이트는 **두 겹**: 이 config 게이트(모델이 인코더를 안 만들게) +
             DropObservationKeysProcessorStep(관측 dict 에서 실제 제거). 둘 다 필요.
         """
-        ...  # 구현 ②
+        if self.use_depth:
+            return
+        if not self.input_features:
+            # make_policy 가 채우기 전에 불릴 수 있다 (기본 생성 등) -> 방어.
+            return
+        if DEPTH_KEY not in self.input_features:
+            # ★ idempotent: 정책·프로세서 어느 쪽이 먼저 불러도, 몇 번을 불러도 동일.
+            #   이미 없으면 no-op 이라 dict 를 새로 만들지도 않는다.
+            return
+        self.input_features = {k: v for k, v in self.input_features.items() if k != DEPTH_KEY}

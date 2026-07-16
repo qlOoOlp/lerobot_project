@@ -258,6 +258,10 @@ relative_transform(anchor, state) = anchor⁻¹ @ state
 ```
 **오프라인 좌표계가 상쇄된다.** 그래서 metaworld(월드 절대)든 UMI(episode-start 상대)든 **정책이 보는 값은 같은 의미**가 된다. → "정책이 데이터에 의존하면 안 된다"는 요구가 이 한 줄로 보장됨.
 
+
+> ⚠ **이 상쇄는 `relative` 에만 성립한다.** `delta` 는 평행이동엔 불변이지만 **회전엔 변한다**
+> (원본 UMI 의 delta 가 위치를 월드 프레임에서 뺄셈하기 때문). 실측 표·근거: information.md §3 "데이터 비의존성".
+> 기본값이 relative 라 현재는 무해하지만, `action_pose_repr="delta"` 로 바꾸면 UMI↔metaworld 비의존성이 깨진다.
 ### 정규화가 IDENTITY 인 이유 (dev_plan §11)
 > *"dataset stats 는 canonical 기준인데 런타임이 relative 로 바꾼다 → canonical stats 를 그대로 쓰면 **표현 공간이 안 맞을 수 있다**"*
 
