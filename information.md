@@ -156,6 +156,19 @@ custom/utils/lerobot_canonical/
 > `lerobot_robot_`/`camera_`/`teleoperator_`/`policy_` 만 자동 import 한다. 얘는 라이브러리이지
 > 플러그인이 아니므로 그 목록에 없는 이름이어야 한다.
 
+### 뭐가 배포판이고 뭐가 모듈인가 (판정 기준 하나)
+
+> **설치된 배포판이 import 하면 → 배포판. 스크립트만 import 하면 → 모듈로 족하다.**
+
+| 대상 | 형태 | 왜 |
+|---|---|---|
+| `lerobot_canonical` | **배포판** | 정책(배포판)이 import → 강제 |
+| `lerobot_policy_umidiffusion` | **배포판** | `lerobot_policy_` 접두사 = 자동탐색 조건 |
+| `custom/envs/metaworld/canonical.py` | **모듈** | 소비자가 스크립트뿐. 게다가 env 는 접두사가 아예 없고(`cfg.package_name` 방식), `@EnvConfig.register_subclass("metaworld")` 는 **lerobot 본체에 이미 있음**(`envs/configs.py:349`) |
+| `custom/scripts/**` | **스크립트** | 아무도 import 안 함 (실행만) |
+
+이 기준을 어기면 오늘의 그 에러가 난다 — 배포판이 비배포판을 import → `ModuleNotFoundError` → 자동탐색이 **삼킴** → `invalid choice`. 근거·검증은 refactoring.md 부록 D.6/D.6.1.
+
 ### `keys.py` — lerobot 상수에서 **파생**
 `image_key(cam)` = `f"{OBS_IMAGES}.{cam}"` / `RGB_KEY`·`DEPTH_KEY` = 그 헬퍼로 조립 / `STATE_KEY`·`ACTION_KEY` = `OBS_STATE`·`ACTION` **별칭**.
 → 파일 안에 `"observation..."` 문자열 리터럴 **0개**. lerobot 이 규약을 바꿔도 자동 추종.
