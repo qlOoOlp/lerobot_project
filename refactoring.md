@@ -277,7 +277,20 @@ output_steps = [Unnormalizer, Device(cpu)]
 | action | **(4,)** (env 4D) | `action` **(10,)** |
 | 이미지 | `pixels/top` → `observation.image` **480×480** | `observation.images.rgb` **240×240** |
 
-> ⚠ **이중 flip 함정** — `envs/metaworld.py:172` 의 wrapper 가 **이미** `np.flip(image, (0,1))` 을 한다
+> **flip 은 학습과 무관하다.** 대칭 쌍은 학습↔추론이 아니라 **수집↔추론**이다:
+> ```
+> 수집:  env raw ──flip──resize──> 데이터셋    ← 여기서 구워짐 (파일에 박힘)
+> 학습:  데이터셋 ─────────────-─> 정책        ← flip 할 게 없음. env 를 만난 적도 없음
+> 추론:  env raw ──flip──resize──> 정책        ← 수집과 '같은 함수' render_frame()
+> ```
+> 즉 `train==inference` 의 실제 의미는 **`데이터셋 == 추론 입력`**. flip/resize/그리퍼 이진화는
+> **고정 상수라 오프라인에 구울 수 있어** 런타임 프로세서에 **없다**(수집 때 1번, 추론 때 1번).
+> 반대로 **anchor-relative 는 학습·추론 둘 다** 런타임 프로세서에서 한다 — 윈도우의 anchor 에
+> 종속이라 못 굽는다(dev_plan §3.2). **판정: 구울 수 있나? → 수집에 bake / 없으면 → 런타임 양쪽.**
+>
+> ⚠ **이중 flip 함정** (학습/추론 문제가 아니라 **어떤 env 객체를 넘기냐** 문제)
+> — `envs/metaworld.py` 의 wrapper 는 `render()`(149행)·`_format_raw_obs()`(172행) **두 곳 모두**에서
+> `camera_name=="corner2"` 면 **이미** `np.flip(image, (0,1))` 을 한다
 > (*"The corner2 camera outputs images with both axes inverted"*). 우리 `render_frame` **도** flip 한다.
 > → rollout 에서 **wrapper 를 넘기면 이중 flip = 거꾸로 된 그림으로 추론**. Phase 1 수집이
 > `render_frame(wrapper._env, 240)` (**내부** env) 였으므로 **rollout 도 똑같이 `wrapper._env` 를 넘겨야** 한다.
