@@ -93,9 +93,12 @@ fps 80
 ```
 
 ### 세부 작업
-1. [ ] **ext_core (최소)**: `common/lerobot_ext_core/{keys,schemas}.py`
-   - `keys.py`: lerobot `utils/constants.py`(`OBS_IMAGES`,`OBS_STATE`,`ACTION`) 위에 `RGB_KEY`/`STATE_KEY`/`ACTION_KEY`
-   - `schemas.py`: dims/axes (`POSE_DIM=9`, `GRIPPER_DIM=1`, `STATE_DIM=10`, rot6d `STATE_AXES`)
+1. [x] **ext_core (최소)** ✅: `common/lerobot_ext_core/{keys,canonical_ee10}.py`
+   - `keys.py`: lerobot `utils/constants.py`(`OBS_IMAGES`,`OBS_STATE`,`ACTION`) 위에 `image_key()`/`RGB_KEY`/`DEPTH_KEY`/`STATE_KEY`/`ACTION_KEY` — 전부 상수 **파생**(문자열 하드코딩 0). 표현 무관 → 모든 표현이 공유
+   - `canonical_ee10.py`: dims/axes (`POSE_DIM=9`, `GRIPPER_DIM=1`, `STATE_DIM=10`, rot6d `STATE_AXES`). **표현 하나**임을 이름으로 명시(구 `schemas.py`)
+     - schema 는 **로봇이 아니라 표현(EE-Cartesian pose+gripper)에 종속** → metaworld/Sawyer·franka·UMI 가 공유. **로봇 교체 = 재사용**, **표현 변경 = 새 모듈**
+     - 새 표현(관절 등)은 **flat sibling** 추가(`canonical_joint7.py`), 기존 모듈 불변(open/closed). 표현이 여러 개로 번지면 그때 `schemas/` 서브패키지로 승격
+     - 대외 계약(모든 표현 모듈 공통): `STATE_DIM`/`STATE_AXES`/`ACTION_DIM`/`ACTION_AXES` · 내부 사정: `POSE_DIM`/`POSE_AXES`/`GRIPPER_*` → 다운스트림은 `sch.STATE_DIM` 식으로 **모듈 import** 해 표현만 갈아끼움
    - ★ **feature 빌더·정책 feature 는 여기 두지 말 것** — 정책은 데이터셋에서 파생(`dataset_to_policy_features`), feature dict 는 변환기가 정의 (lerobot 정석, 부록 D)
 2. [ ] **metaworld env↔canonical 매핑 포팅**: `metaworld_canonical.py`(`state4_to_canonical10`/`canonical10_to_env_action`) — 이게 **env_processor 역할**, 수집·rollout(Phase 5) 공유 (부록 D.1)
 3. [ ] **수집/변환 → LeRobotDataset**: `collect_metaworld_canonical.py`(in-env 수집) 또는 `convert_metaworld_canonical.py`(`lerobot/metaworld_mt50` 변환). 수동 features(canonical 10D) + `LeRobotDataset.create` + `add_frame` 루프 + `save_episode` (**port_droid 패턴, Robot 없음**)

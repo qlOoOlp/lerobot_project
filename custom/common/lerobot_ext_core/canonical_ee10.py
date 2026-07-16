@@ -1,8 +1,19 @@
-"""ext_core canonical schema — dim, axes
+"""EE-pose canonical representation (10D) — dim, axes.
 
-canonical layout (10D): [x, y, z, rot6d(6), gripper]
+ONE representation among possible others — NOT "the" schema.
+Layout (10D): [x, y, z, rot6d(6), gripper]
   - pose    : xyz(3) + rot6d(6) = 9D
   - gripper : 1D
+Shared by every EE-Cartesian embodiment we use (metaworld/Sawyer, franka, UMI):
+swapping the *robot* needs no new module — only a *representation* change does.
+A new representation (e.g. joint-space) -> add a flat sibling module
+(`canonical_joint7.py`); do not edit this one.
+
+Outward contract (every representation module exposes these):
+    STATE_DIM, STATE_AXES, ACTION_DIM, ACTION_AXES
+Representation-internal (this module only):
+    POSE_DIM, POSE_AXES, GRIPPER_DIM, GRIPPER_AXES
+
 Used for LeRobotDataset feature `shape`/`names.axes`  
 """
 from __future__ import annotations
