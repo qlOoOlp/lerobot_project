@@ -92,12 +92,24 @@ fps 80
 ```
 > **state·action 둘 다 절대값**(delta 아님). `delta` 는 env 경계(`canonical10_to_env_action`)에서만 생김 — 폴더명 `umi2lerobot_delta_pose` 에 낚이지 말 것(옛 UMI 변환본도 실측상 절대값). rot6d 채택 근거·복원식·절대 vs delta 상세: **retargeting.md 1절**.
 
-### ✅ 산출물 (2026-07-16)
+### ✅ 산출물
 | | |
 |---|---|
-| **데이터셋** | `~/datasets/metaworld_canonical/pick_place_v3_bin` — **300ep / 16,370프레임**, expert 실패 0 |
-| **코드** | `custom/utils/lerobot_canonical/` · `custom/envs/metaworld/{canonical,collect}.py` |
-| **계약 문서** | `retargeting.md` (그리퍼 규약 · `xyz_scale` 근거 · 변경 이력) |
+| **코드** ✅ | `custom/utils/lerobot_canonical/` · `custom/envs/metaworld/canonical.py` · `custom/scripts/sim/collect_metaworld.py` |
+| **계약 문서** ✅ | `retargeting.md` (그리퍼 규약 · `xyz_scale` 근거 · 변경 이력) |
+| **데이터셋** ⏳ | **재수집 필요** → `~/datasets/metaworld_canonical/pick_place_v3_bin` (이 경로로 만들면 아래 명령·문서가 전부 그대로 유효) |
+
+> **왜 재수집인가 (2026-07-17)**: 옛 300ep(16,370프레임)은 **시딩 함정** 시절 산출물이라 재현이 안 됐다
+> — `env.reset(seed=)` 을 Meta-World 가 설계상 버려서 `--seed-base` 가 아무 일도 안 했다. 매 수집이 다른
+> 장면을 뽑았고, "eval seed 0~9 홀드아웃" 도 성립하지 않았다. 고친 지금은 같은 명령 = 같은 데이터셋
+> (50ep 2회로 실측 확인). 옛 데이터셋 3.6GB 는 남길 가치가 없어 전부 삭제. 원인·해법: information.md §1.3 "시딩 함정".
+>
+> **수집 명령**:
+> ```bash
+> MUJOCO_GL=egl python custom/scripts/sim/collect_metaworld.py \
+>     --output-root ~/datasets/metaworld_canonical/pick_place_v3_bin --n-episodes 300
+> ```
+> 나머지는 전부 기본값(`pick-place-v3`, 240px, 80fps, threshold 0.7, seed-base 100, noise 30%/std 0.15).
 
 ### ✅ 확정된 상수 (Phase 5 가 **같은 값**을 써야 함 → train==inference)
 | 상수 | 값 | 성격 |
@@ -310,7 +322,17 @@ output_steps = [Unnormalizer, Device(cpu)]
      - `gripper_threshold = PICK_PLACE_GRIPPER_THRESHOLD` (0.7) — **태스크 의존**. 수집 때 데이터셋에 bake 된 값
      - `xyz_scale = ENV_XYZ_SCALE` (0.01) — **태스크 무관**(env 상수). **데이터 통계(p95=0.013 등)로 잡지 말 것** (retargeting.md 5절: 0.0155→35% 미달 / 0.004→항상 클립)
      - **카메라 = `corner2`** — **카메라 의존**(`FLIP_CAMERAS`). 넘기는 게 아니라 **같은 카메라로 env 를 만들면** 된다: `render_frame` 이 `env.camera_name` 을 읽어 스스로 가드하므로 desync 가 불가능하다. 다른 카메라로 만들면 flip 이 자동으로 안 걸리는데, 그건 맞는 동작이지만 **시점 자체가 학습 데이터와 달라진다**
-   - eval seed 는 **0~9** 사용 (수집이 `seed_base=100` 이라 홀드아웃됨)
+   - ★ **`env.seeded_rand_vec = True` 를 반드시 켤 것** — 안 켜면 eval seed 가 **아무 일도 안 한다**.
+     Meta-World 는 물체·목표 배치를 세 갈래로 뽑는데(`sawyer_xyz_env.py:697`), lerobot wrapper 가
+     `_freeze_rand_vec=False` 만 켜고 `seeded_rand_vec` 는 안 켜서(`envs/metaworld.py:163`) **전역
+     `np.random` 갈래**에 떨어진다. 거기선 `reset(seed=n)` 이 **설계상 버려지고**(Meta-World reset
+     docstring: *"seed: The seed to use. **Ignored**, use `seed()` instead."*) `env.seed(n)` 조차 무력하다
+     (`self.np_random` 을 안 읽으므로). 켜는 법은 `collect_metaworld.py` main() 참고 —
+     **`env.seeded_rand_vec = True` + `env.seed(n)` + `env.reset()`** (reset 에 seed 를 넘기지 말 것).
+   - eval seed 는 **0~9** 사용 — 수집이 `seed_base=100` 이므로 홀드아웃된다. **단 위의 `seeded_rand_vec` 가
+     전제다**: 안 켜면 seed 가 장면을 정하지 않아 "홀드아웃" 이라는 개념 자체가 성립하지 않는다
+     (실측: 안 켜면 같은 seed 로 두 번 돌려도 물체·목표가 매번 다름 → 데이터셋 재현 불가, 정책 A/B 를
+     같은 장면에서 비교하는 것도 불가). information.md §1.3 "시딩 함정" 참고.
 4. [ ] **검증**: 1 에피소드 rollout → 성공률/영상. **여기까지 = metaworld 코어 루프(데이터→학습→eval) 완성**
    - 정책의 그리퍼 출력은 **{0,1} 이진**이어야 자연스러움 (데이터가 이진) → `(0.5−o)×2` 로 `±1` 명령
 

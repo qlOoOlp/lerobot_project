@@ -195,7 +195,8 @@ custom/utils/lerobot_canonical/
 
 ## 1.3 metaworld 수집 (`custom/envs/metaworld/` + `custom/scripts/sim/`)
 
-Phase 1 산출물: `~/datasets/metaworld_canonical/pick_place_v3_bin` — **300ep / 16,370프레임**, canonical 10D, 이진 그리퍼, 80fps. 번역 계약 전반은 `retargeting.md`.
+Phase 1 산출물 = **코드**(어댑터 + 수집 스크립트). 데이터셋은 `~/datasets/metaworld_canonical/pick_place_v3_bin`
+(canonical 10D, 이진 그리퍼, 80fps) — **2026-07-17 현재 재수집 필요**(아래 "시딩 함정"). 번역 계약 전반은 `retargeting.md`.
 
 ### `canonical.py` — env 어댑터 (경계를 넘는 것 **전부**)
 | 함수 | 방향 | 핵심 |
@@ -243,8 +244,39 @@ sch.STATE_DIM, sch.POSE_DIM, sch.IDENTITY_ROT6D   # lerobot_canonical 에서 imp
 | `env.render(mode=...)` | gymnasium 0.26+ 는 **인자 없음**. `render_mode`/`camera_name` 은 생성 시 고정 |
 | `canonical[-1]` vs `canonical[-1:]` | 축이 사라져 `concatenate` 실패. `("gripper",)` 콤마, `state4[..., 3:4]` 와 같은 함정 |
 | `xyz_scale` 을 데이터 통계로 잡기 | **env 상수(0.01)** 여야 함. 통계는 손의 **지연 응답**이라 gain 이 아님 → retargeting.md 5절 |
+| `env.reset(seed=n)` 으로 장면 고정 | **Meta-World 가 설계상 버린다** → 아래 "시딩 함정" |
+| `render_frame` 무조건 flip | flip 은 **corner2 카메라**의 성질. 카메라 바꾸면 조용히 틀림 → `FLIP_CAMERAS` 가드 |
 
-### 검증 (Step 5)
+### ★ 시딩 함정 — `reset(seed=)` 은 무시된다 (2026-07-17, 반나절 소모)
+
+**증상**: 같은 명령으로 두 번 수집했는데 프레임 수가 달랐다(16,370 vs 16,291). **ep0 부터** 달랐다.
+
+**원인**: Meta-World 는 물체·목표 배치(`rand_vec`)를 **세 갈래**로 뽑는다 — `sawyer_xyz_env.py:697`:
+```python
+if self._freeze_rand_vec:   return self._last_rand_vec           # 고정 (랜덤화 없음)
+elif self.seeded_rand_vec:  rand_vec = self.np_random.uniform(...)   # env.seed(n) 이 제어 ✓
+else:                       rand_vec = np.random.uniform(...)        # ★ 전역 np.random
+```
+lerobot wrapper 는 `_freeze_rand_vec = False` **만** 켜고 `seeded_rand_vec` 는 안 켠다(`envs/metaworld.py:163`)
+→ **세 번째 갈래**. 여기선 우리가 뭘 넘겨도 장면을 제어할 수 없다:
+- `env.reset(seed=n)` → **설계상 버려진다**. Meta-World reset docstring 이 직접 말한다:
+  *"seed: The seed to use. **Ignored**, use `seed()` instead."* (`sawyer_xyz_env.py:670`).
+  실제로 `reset()` 은 `reset_model()`(여기서 rand_vec 을 뽑음) 뒤에 `super().reset()` 을 **seed 없이** 부른다
+  → gymnasium 의 재시드가 아예 안 일어난다.
+- `env.seed(n)` → **이것도 무력**. `self.np_random` 을 seed 하지만 위 갈래는 그걸 안 읽는다.
+- `np.random.seed(n)` → 먹히긴 하나 **전역 상태**를 오염시킨다.
+
+**해법** (실측 검증): `env.seeded_rand_vec = True` + `env.seed(n)` + `env.reset()` (**reset 에 seed 금지**).
+→ 같은 명령 두 번 = **완전히 동일한 데이터셋**.
+
+**안 켰을 때의 실제 피해**:
+- 데이터셋 **재현 불가** — 같은 실험을 다시 못 만든다
+- **"eval seed 0~9 홀드아웃" 이 거짓말이 된다** — seed 가 장면을 안 정하니 홀드아웃 개념이 성립 안 함
+  (다만 연속 분포에서 매번 무작위라 train/eval 이 겹칠 확률은 ≈0 → **일반화 평가 자체는 유효**했다)
+- **정책 A/B 를 같은 장면에서 비교 불가** → Phase 5 에서 성공률 차이가 정책 탓인지 장면 운인지 구분 불가.
+  이게 진짜 피해다.
+
+### 검증 (Step 5) — 옛 300ep 산출물 기준 (2026-07-16)
 ```
 raw_inspect   300ep 80fps 균일 · 10D 일관 · no-warning
 이진 그리퍼    state[9]/action[9] 고유값 {0,1} · 열림 55.5%
@@ -252,7 +284,15 @@ meta.stats    rot6d std=0 (상수, 정상) · gripper mean .555/std .497
 스키마 대조    옛 pick_place_v3_inenv 와 차이 1개: gripper_width → gripper (의도)
 flip 방향     gif 육안 확인 (코드로 검증 불가) → tmp/real/
 ```
-> **옛 데이터셋 주의**: `pick_place_v3`·`pick_place_v3_inenv` 는 그리퍼가 **연속**이라 새 규약과 다름. 학습엔 `pick_place_v3_bin` 사용.
+> ⚠ **위 수치는 재현 불가**(2026-07-17 확인). 시딩 함정 때문에 장면이 매번 달랐던 시절의 산출물이라,
+> 같은 명령을 다시 돌려도 같은 숫자가 안 나온다. **성격 판정에는 여전히 유효**하다(80fps 균일, 10D 일관,
+> 그리퍼 이진 {0,1}, rot6d std=0 은 구조적 사실이라 장면과 무관) — 재수집 후 바뀌는 건 프레임 수·평균값뿐.
+> 검증 항목 자체는 재수집 때 그대로 다시 돌리면 된다.
+
+> **데이터셋 현황(2026-07-17)**: `~/datasets/metaworld_canonical/` 전체 삭제됨. 시딩 수정 전 수집분이라
+> 재현이 안 돼 남길 가치가 없었다(3.6GB). **재수집 필요** — 고쳐진 `collect_metaworld.py` 로 돌리면
+> `--seed-base` 가 실제로 작동해 이후 모든 실험이 재현·비교 가능하다.
+> 옛 `pick_place_v3`·`pick_place_v3_inenv` 는 그리퍼가 **연속**이라 어차피 새 규약과 달랐다(참고용 기록).
 
 ---
 

@@ -108,6 +108,9 @@ def collect_episode(
     """Roll the scripted expert once and record the frames.
 
     Args:
+        seed: scene seed (object/goal placement). Applied via env.seed(), NOT via
+            reset(seed=...) — Meta-World discards the latter by design; see the
+            seeded_rand_vec note in main(). Requires env.seeded_rand_vec = True.
         noise_std: if not None, add N(0, noise_std) to the expert's xyz action
             (recovery data). The gripper channel is never noised.
         rng: seeded generator, so a run is reproducible.
@@ -119,7 +122,8 @@ def collect_episode(
           success : True if info["success"] was ever 1
         The reset frame is included, so N == steps + 1.
     """
-    obs, _ = env.reset(seed=seed)
+    env.seed(seed)
+    obs, _ = env.reset()
     states4 = [obs[:4]]
     images = [render_frame(env, image_size)]
     success = False
@@ -167,6 +171,22 @@ def main() -> None:
     env = wrapper._env
     expert = wrapper.expert_policy
     task_text = wrapper.task_description
+
+    # ★ REQUIRED for --seed-base to do anything at all. Meta-World picks the object/goal
+    # placement in one of three ways (sawyer_xyz_env.py:697):
+    #     _freeze_rand_vec=True  -> reuse last vec        (no randomization)
+    #     seeded_rand_vec=True   -> self.np_random        (env.seed(n) controls it)  <- we want this
+    #     else (DEFAULT)         -> global np.random      (nothing we pass controls it)
+    # The lerobot wrapper sets _freeze_rand_vec=False but leaves seeded_rand_vec=False
+    # (envs/metaworld.py:163), landing us in the global-np.random branch. There,
+    # `env.reset(seed=n)` is silently discarded — Meta-World's own reset() docstring says
+    # "seed: The seed to use. Ignored, use `seed()` instead." (sawyer_xyz_env.py:670) — and
+    # even env.seed(n) is inert, because self.np_random is not the RNG being read.
+    # Consequence when unset: every run draws different scenes, so a dataset can never be
+    # reproduced and two policies can never be evaluated on the same 10 scenes.
+    # Verified: with this flag + env.seed(n), repeated runs give identical scenes; without
+    # it, they differ on the very first episode.
+    env.seeded_rand_vec = True
 
     dataset = LeRobotDataset.create(
         repo_id=args.repo_id,
