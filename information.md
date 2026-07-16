@@ -413,6 +413,60 @@ relative_transform(anchor, state) = anchor⁻¹ @ state
 > ⚠ **"rot6d std=0 나눗셈 회피"는 근거가 아니다** — 2-0 실측으로 반증됨. lerobot 이 `denom = std + eps`(eps=1e-8)로 이미 막는다(`processor/normalize_processor.py:94, :335`). MEAN_STD 여도 NaN 안 남(상수 채널은 `0/1e-8=0` → 죽은 채로 들어갈 뿐).
 > → **표현공간 불일치(dev_plan §11)가 IDENTITY 의 유일한 근거.**
 
+### ★ 이미지(VISUAL) 는 `MEAN_STD` 인데, 그 stats 는 **데이터셋에서 안 온다** (2026-07-17 확인)
+
+```python
+# lerobot/datasets/factory.py:128-131  — make_dataset 안
+if cfg.dataset.use_imagenet_stats:          # ← 기본값 True (configs/default.py:35)
+    for key in dataset.meta.camera_keys:
+        for stats_type, stats in IMAGENET_STATS.items():
+            dataset.meta.stats[key][stats_type] = torch.tensor(stats)   # ★ 덮어쓴다
+# IMAGENET_STATS = mean [0.485, 0.456, 0.406] / std [0.229, 0.224, 0.225]
+```
+
+**데이터셋의 이미지 stats 는 학습에 안 쓰인다.** `make_dataset` 이 ImageNet 상수로 덮어쓰고, 그게
+`make_policy` → `make_umidiffusion_pre_post_processors(dataset_stats=...)` → Normalizer 로 흘러간다.
+
+실증(lerobot_hong 체크포인트의 `policy_preprocessor_step_*_normalizer_processor.safetensors`):
+| run | frames | `observation.images.rgb.std` |
+|---|---|---|
+| metaworld_pick_place_inenv | 16,377 | `[0.229, 0.224, 0.225]` |
+| metaworld_pick_place | 2,656 | `[0.229, 0.224, 0.225]` |
+| metaworld_reach | 2,351 | `[0.229, 0.224, 0.225]` |
+| umi_move260626 | 24,391 | `[0.229, 0.224, 0.225]` |
+
+**sim 이미지와 실사 이미지가 같은 값** = 데이터에서 계산한 게 아니라는 증거.
+
+> ⚠⚠ **`--dataset.use_imagenet_stats=false` 로 끄지 말 것 (v0.4.4)**
+>
+> lerobot v0.4.4 는 이미지 std 를 **틀리게 계산한다** — `RunningQuantileStats.update` 가
+> `np.mean(batch**2)` 를 **uint8 그대로** 계산해 오버플로:
+> ```
+> sample_images  → "we load as uint8 to reduce memory" → uint8 반환
+> batch**2       → 200² = 40000 → uint8 에선 64
+> mean_of_squares = 105   (참값 21712)
+> var = mos − mean² = 음수  →  std = 0
+> ```
+> `np.mean` 은 float64 로 승격되어 **mean 만 맞고 std 만 죽는다**. 집계(`aggregate_feature_stats`)의
+> pooled variance 공식 자체는 정확하나, per-episode std=0 이라 **에피소드 평균들의 변동만** 남는다
+> → 참값의 1/100 (실측: pick_place_v4 `std=[0.001, 0.0022, 0.0022]` vs 실측 `[0.142, 0.187, 0.190]`).
+> 에피소드가 1개면 정확히 0 (`umi_processed_ep0_rel_v1`).
+>
+> **끄면 `(x − mean)/(0.001 + 1e-8)` 로 ±500 짜리 입력이 들어가고, 에러 없이 학습이 망가진다.**
+> upstream 은 이미 고쳤다 — main 브랜치에 `batch = batch.astype(np.result_type(batch.dtype, np.float32), copy=False)`
+> 한 줄이 추가됨 (`RunningQuantileStats` 는 PR #1985 로 들어온 코드). v0.4.4 엔 그 줄이 없다.
+> **끄고 싶으면 lerobot 을 올리거나 stats 를 재계산한 뒤에.**
+>
+> **지금 고칠 필요는 없다** — 학습·추론 경로가 이 값을 안 읽고, `state`/`action` 은 float32 라
+> 오버플로가 없으며(게다가 IDENTITY), `raw_inspect` 도 이미지는 `min/max/mean` 만 본다(:406).
+> lerobot 을 올리는 날 공짜로 사라진다.
+
+> **부수 관찰**: ImageNet 상수는 **ImageNet 사전학습 백본**과 짝일 때 의미가 있는데, 우리는
+> `pretrained_backbone_weights=None` 으로 resnet18 을 **scratch 학습**한다 → 짝이 없는 임의의 affine 변환.
+> **해롭진 않다**(scratch 백본이 첫 conv 에서 흡수). lerobot_hong 도 동일 설정으로 metaworld 를 성공시켰다.
+> Phase 4 에서 학습이 막히면 노브 후보: ① 실측 stats(위 버그 선결) ② `pretrained_backbone_weights="IMAGENET1K_V1"`
+> (그러면 ImageNet 상수가 비로소 짝이 맞음).
+
 ### 세부 규약
 - **pose 9D 만 변환**, gripper 1D 는 그대로 이어붙임 / **차원 유지** 10D→10D (dev_plan §9.4)
 - **`action` 없으면 skip** — eval/추론 raw 관측엔 action 이 없음 (dev_plan §9.3)
