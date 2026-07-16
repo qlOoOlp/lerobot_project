@@ -67,6 +67,19 @@ ENV_ACTION_DIM: int = 4   # env action: [dx, dy, dz, closing_effort]
 # other task (see the module docstring); do not reuse blindly.
 PICK_PLACE_GRIPPER_THRESHOLD: float = 0.7
 
+# The env's own action->displacement gain, NOT a statistic of any dataset:
+#   sawyer_xyz_env.py:327   pos_delta = np.clip(action, -1, 1) * self.action_scale
+#   sawyer_xyz_env.py:182   action_scale: float = 1.0 / 100
+# Verified by driving the env: a constant action of 1.0/0.5/0.25 settles at
+# 0.01003/0.00513/0.00261 m per step — exactly action * action_scale.
+# Task-independent (it is the env's constant), unlike the gripper threshold.
+#
+# ⚠ Do NOT fit this to the observed |dxyz| distribution. The hand lags the mocap
+# (weld + frame_skip=5), so it ramps up over ~10 steps and can transiently exceed
+# action_scale while catching up (pick-place measures mean 0.008, max 0.016). Those
+# are the *response*, not the gain: using them would make every command undershoot.
+ENV_XYZ_SCALE: float = 0.01
+
 
 def render_frame(env: Any, image_size: int) -> np.ndarray:
     """Render the corner2 camera as an (image_size, image_size, 3) uint8 RGB frame.
@@ -126,6 +139,7 @@ def canonical10_to_env_action( # canonical 10D (abs) -> env 4D (rel)
 __all__ = [
     "STATE4_DIM",
     "ENV_ACTION_DIM",
+    "ENV_XYZ_SCALE",
     "PICK_PLACE_GRIPPER_THRESHOLD",
     "render_frame",
     "state4_to_canonical10",

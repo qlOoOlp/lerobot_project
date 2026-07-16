@@ -92,7 +92,49 @@ metaworld `env.step()` 은 `spaces.Box(low=-1, high=1)` 를 요구한다 (lerobo
 - 연속 vs 이진 **ablation 불가** — 원하면 재수집(env 재실행)
 - metaworld 의 *연속* 그리퍼 정보(쥠 정도)는 데이터셋에 남지 않음
 
-## 5. 회전 (rot6d)
+## 5. `xyz_scale` — env 상수이지 통계가 아님 ⚠
+
+canonical 은 **절대 목표 위치**, metaworld 액션은 **상대 이동량**이라 경계에서 나눠줍니다:
+```python
+delta_xyz = (target_xyz − current_ee_xyz) / xyz_scale     # canonical10_to_env_action
+```
+`xyz_scale` = **"액션 1.0 이 몇 미터냐"**.
+
+### 정답: `ENV_XYZ_SCALE = 0.01` (= env 의 `action_scale`)
+env 소스에 박혀 있습니다:
+```python
+# metaworld/sawyer_xyz_env.py:327
+pos_delta = np.clip(action, -1, 1) * self.action_scale
+# :182   action_scale: float = 1.0 / 100
+```
+**실측 검증** (env 를 직접 구동, 정상상태 |dxyz|/step):
+| action | 실측 | 기대 `action × 0.01` |
+|---|---|---|
+| 1.00 | **0.01003** | 0.01000 |
+| 0.50 | **0.00513** | 0.00500 |
+| 0.25 | **0.00261** | 0.00250 |
+
+→ 정확히 선형. **태스크 무관**(env 상수)이라 그리퍼 threshold 와 성격이 다름.
+
+### ⚠ 데이터 분포에 맞추지 말 것 — 두 번 낚인 지점
+손은 mocap 을 **지연 추종**합니다(weld + `frame_skip=5`). 그래서 관측된 `|dxyz|` 는:
+- 초기 ~10스텝 **램프업** (`0.0012 → 0.0028 → … → 0.01`)
+- 뒤처졌다 **따라잡을 때 `action_scale` 을 초과** (pick-place 실측 mean 0.008, **max 0.016 > 0.01**)
+
+이건 **응답(response)** 이지 **이득(gain)** 이 아닙니다. 통계로 잡으면:
+| 잘못된 값 | 결과 |
+|---|---|
+| `0.0155` (p95) | 0.008m 원할 때 action 0.52 → 실제 0.005m → **매 스텝 35% 미달 → 누적 드리프트** |
+| `0.004` (옛 메모) | 0.008m 원할 때 action 2.0 → **항상 클립 → 항상 최고속 → 미세조정 불가** (과거 grasp 실패와 일치) |
+
+### 실측 통계의 올바른 용도 = **sanity check**
+```
+mean 0.008 / 0.01 = 0.8    → 전형 액션 ≈0.8, [-1,1] 범위를 잘 씀 ✓
+max  0.016  / 0.01 = 1.6   → 상위 몇 %만 클립(따라잡기 구간) → 정상
+```
+이 비율이 0.1 이나 5.0 이면 뭔가 잘못된 것.
+
+## 6. 회전 (rot6d)
 
 | 소스 | rot6d 채널 |
 |---|---|
@@ -102,7 +144,7 @@ metaworld `env.step()` 은 `spaces.Box(low=-1, high=1)` 를 요구한다 (lerobo
 
 → **값(`IDENTITY_ROT6D`)은 표현 상수라 어디서나 동일**, *쓰느냐*만 embodiment 별.
 
-## 6. 변경 이력
+## 7. 변경 이력
 
 ### 2026-07-16 — UMI raw 그리퍼 규약 재작성 (250 에피소드)
 `/home/hong/datasets/umi_ft/move260626/ft_data/episode_*.h5`
@@ -116,8 +158,10 @@ metaworld `env.step()` 은 `spaces.Box(low=-1, high=1)` 를 요구한다 (lerobo
 - 목적: raw 를 canonical 과 같은 극성으로 맞춰 **컨버터에서 뒤집기 없이 통과**시키기 위함.
 - ⚠ 이 변경 이후로 raw 를 읽는 모든 코드는 **`0=닫힘`** 기준. 옛 변환본(`move260626_rel_clean_*` 등)은 **뒤집기 없던 시절 산출물이라 그리퍼가 전부 `1`** → 새 규약상 "열림"으로 오독됨. **Phase 6 에서 재변환 필요**(패치 아님).
 
-## 7. 미해결 / TODO
-- [ ] `gripper_threshold` 태스크별 실측값 확정 (pick-place 우선)
+## 8. 미해결 / TODO
+- [x] `gripper_threshold` pick-place 실측 확정 → **0.7** (`PICK_PLACE_GRIPPER_THRESHOLD`). 다른 태스크는 재실측 필요
+- [x] `xyz_scale` 확정 → **0.01** (`ENV_XYZ_SCALE`, env 상수 + 실측 검증). 5절
 - [ ] UMI move260626 그리퍼가 **상수 0**(항상 닫힘) — 태스크 특성인지 기록 오류인지 Phase 6 에서 확인
 - [ ] franka 그리퍼 번역 규약 (Phase 9)
 - [ ] metaworld 연속 vs 이진 ablation 결과 기록
+- [ ] Phase 5 rollout 이 `ENV_XYZ_SCALE`·`PICK_PLACE_GRIPPER_THRESHOLD` 를 **수집과 같은 값**으로 쓰는지 확인 (train==inference)
