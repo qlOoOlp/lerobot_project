@@ -394,12 +394,36 @@ output_steps = [Unnormalizer, Device(cpu)]
 > 같은 이유로 wrapper 의 `pixels`(480, 이미 un-flip 됨)를 쓰면 안 된다 — train≠inference.
 > 참고: wrapper 의 `agent_pos = raw_obs[:4]`(`metaworld.py:173`)은 우리 `state4` 와 **동일 정의**.
 
+### ★ 왜 `select_action` 을 못 쓰나 — **lerobot 설계 가정과의 충돌** (2026-07-17 규명)
+
+> **lerobot 의 가정: 프로세서는 프레임 단위 무상태, 히스토리는 정책이 소유.**
+> 내장 step 을 보면 전부 그렇다 — Rename(키만) · AddBatch(프레임 하나) · Device · Normalizer(프레임별 독립).
+> 그래서 히스토리를 정책 안(`_queues`)에 두는 게 자연스럽고, 내장 정책(diffusion/ACT/VQBeT/pi0)이
+> **전부 절대 관측**을 쓰니 아무도 이 벽에 안 부딪힌다.
+>
+> **우리 요구: 프로세서가 윈도우 전체를 봐야 한다** — 앵커 = `state[:, -1]` 은 **프레임 간(cross-frame)** 연산.
+>
+> 그래서 학습·추론에서 shape 이 갈린다:
+> ```
+> 학습 : DataLoader ──(B,T,10)──> pre → forward           윈도우가 온다. 우리 step OK
+> 추론 : env ──(B,10)──> pre → select_action
+>                              └ 여기서야 (B,T,10). 프로세서는 이미 지나감
+> ```
+> **근본 원인은 우리 선택이다** — 변환을 프로세서에 둔 것. 정책 안(`_prepare_global_conditioning` 뒤)에
+> 뒀다면 `select_action` 이 그냥 됐다. 그럼에도 프로세서를 고른 이유: **한 코드가 학습·추론 양쪽**이라는
+> 보장(dev_plan §12.1). 원본 UMI 는 프로세서가 없어 학습(`umi_dataset`)·추론(`eval_real.py`)을 **따로**
+> 짰고, 그래서 `umi_dataset.py:349` 의 버그(액션에 `obs_pose_repr` 을 넘김)가 생겼다 — 우리 구조가 그걸 원천 차단한다.
+>
+> **embodiment 무관** — UMI·franka·metaworld 전부 같은 우회가 필요하다. 그래서 `ObservationHistoryBuffer` 가
+> **정책 패키지 안**(embodiment 무지)에 있고 Phase 7·9–11 이 재사용한다.
+> **드물지만 이상하지 않다** — "전처리가 히스토리에 의존하는 정책"(relative/delta 표현, 속도 추정 등)이면
+> 다 부딪힌다. lerobot 의 프로세서 추상화가 아직 그 케이스를 안 다룰 뿐이다.
+
 ### 세부 작업
-1. [ ] `make_env`(metaworld gym) 구성 — **내장 `--env.type=metaworld` 사용**, 단 위의 `wrapper._env` 함정 유의
-2. [ ] **env_processor**: Phase 1 의 **같은 매핑 함수**를 얇은 `ObservationProcessorStep` 로 감쌈 (정석 레퍼런스 = lerobot `LiberoProcessorStep`: `_process_observation` 에서 env obs→`observation.state` 조립)
-   - ⚠ **factory 우회 필수(무수정)**: lerobot `envs/factory.py` 의 `make_env_pre_post_processors` 는 LIBERO/Isaaclab 을 **하드코딩 if** 로 붙임 → metaworld 를 같은 식으로 넣으려면 factory 패치 필요 = **0-patch 위반**
-   - → 우리 rollout 스크립트에서 **직접 조립**: `PolicyProcessorPipeline(steps=[MetaworldCanonicalStep()])` (공개 API만 사용). metaworld 는 factory 기본값이 어차피 identity 라 잃는 것 없음
-3. [ ] rollout 루프: `env.step()→env_proc→policy_pre→policy→policy_post→**decode_policy_action**→env_proc→env.step()`
+1. [x] ~~`make_env`(metaworld gym) 구성~~ → **불필요**. `MetaworldEnv(task=..., camera_name="corner2")` 를 직접 만들고 `wrapper._env` 를 몬다 (수집과 동일 경로)
+2. [x] ~~env_processor 를 `ObservationProcessorStep` 으로~~ → **불필요**. 수집이 이미 port_droid 패턴(프로세서 없이 함수 직접 호출)이라, rollout 도 **같은 함수를 직접 부르는 게** train==inference 를 보장한다. `PolicyProcessorPipeline` 을 하나 더 만들 이유가 없었다
+   - (원래 우려였던 "factory 의 LIBERO/Isaaclab 하드코딩 if" 는 애초에 `make_env_pre_post_processors` 를 안 쓰니 무관)
+3. [x] rollout 루프 ✅ → `custom/scripts/sim/rollout_metaworld.py`
    - ★ **`select_action()` 을 쓰지 말 것** — 정책의 큐 stack 이 프로세서보다 뒤라 우리 relative step 이
      `(B,10)` 을 받아 **앵커를 못 만든다**(`ndim!=3` ValueError). 자체 히스토리 버퍼로 `(B,T,10)` 을 만들어
      `preprocessor` 에 넘기고 `policy.diffusion.generate_actions()` 를 직접 부른다. 근거·코드: **2-3 절**
@@ -421,10 +445,42 @@ output_steps = [Unnormalizer, Device(cpu)]
      전제다**: 안 켜면 seed 가 장면을 정하지 않아 "홀드아웃" 이라는 개념 자체가 성립하지 않는다
      (실측: 안 켜면 같은 seed 로 두 번 돌려도 물체·목표가 매번 다름 → 데이터셋 재현 불가, 정책 A/B 를
      같은 장면에서 비교하는 것도 불가). information.md §1.3 "시딩 함정" 참고.
-4. [ ] **검증**: 1 에피소드 rollout → 성공률/영상. **여기까지 = metaworld 코어 루프(데이터→학습→eval) 완성**
+4. [x] **대조군 검증** ✅ — `--expert` 로 scripted expert: **10/10 (100%)**, 46~59스텝. seed 0~9.
+   → **env·시딩·루프·`render_frame`·`canonical10_to_env_action` 무죄.** 이후 실패는 전부 정책 쪽.
+   gif 육안 확인: 방향 정상(테이블 바닥/팔 위).
+5. [ ] **성공률 측정** — 20~30 에피소드. 진행 중 (30k 학습 대기)
    - 정책의 그리퍼 출력은 **{0,1} 이진**이어야 자연스러움 (데이터가 이진) → `(0.5−o)×2` 로 `±1` 명령
+6. [ ] **체크포인트 × consume_steps 2축 스윕** → 우리 조건의 최적점 확정
+
+> ### 중간 결과 (2026-07-17)
+> | ckpt | 성공률 | 옛 기록(mt50 50ep) |
+> |---|---|---|
+> | 5k | 0/3 | 1/10 |
+> | **10k** | **0/10** | 0/10 |
+> | 15k~30k | 대기 | 2, **4**, 3, 3 /10 |
+>
+> **10k 오픈루프 진단** (보고서와 같은 방법 — 학습 프레임 예측 vs GT):
+> ```
+> xyz 오차   mean 5.52mm  max 32.03mm
+> gripper    오차 0.0025  — GT {0,1} vs 예측 {0.0, 0.99, 1.0}
+> ★ 학습은 정상. 0/10 은 closed-loop 문제다
+> ```
+> 구 보고서의 30k 는 1~2mm 였으니 **아직 수렴 전**이다. 옛 스윕의 비단조성(5k=1 > 10k=0)도 재현된다.
+>
+> **남은 노브 (순서)**: ① `consume_steps` 낮추기 — 보고서에서 reach 가 8→4 로 낮춰서야 80% 달성.
+> **재학습 불필요**라 먼저 ② crop 증강 ③ 더 긴 학습
 
 > Robot 없음. 오프라인(Phase 1 수집)·온라인(rollout)이 **같은 canonical 매핑** → 자동 일치 (부록 D.1).
+
+> ### ★ `generate_actions` 는 이미 잘라서 준다 (2026-07-17 확인)
+> ```
+> action_delta_indices = [-1, 0, 1, ..., 14]     ← 16개. 액션 윈도우가 '관측 윈도우 시작(t=-1)' 에 정렬
+> generate_actions:  start = n_obs_steps-1 = 1,  end = start + n_action_steps = 9  ->  actions[:, 1:9]
+> 반환 = (B, 8, 10)   ← horizon 16 이 아니다. 첫 1개(t=-1, 과거)와 뒤 7개를 버린다
+> ```
+> `horizon(16) > n_action_steps(8)` 인 이유 = DP 의 **receding horizon**: 뒤를 버려도 **생성 시엔 필요**하다.
+> `drop_n_last_frames=7 = horizon − n_action_steps − n_obs_steps + 1` 은 **상수로 박혀 있다** —
+> 셋 중 하나라도 바꾸면 **같이 바꿔야 한다**(config 가 자동 계산하지 않음).
 
 ---
 
@@ -448,6 +504,12 @@ output_steps = [Unnormalizer, Device(cpu)]
    - 이 데이터셋의 **이름 함정 3연속**: `umi2lerobot_delta_pose`(실제 절대값) · `gripper_width`(실제 이진 개폐) · `pose_relative`(촬영 시작 기준) → **이름 믿지 말고 실측할 것**
    - **30fps 리샘플**(nearest RGB + interp/slerp pose) + **timestamp 정렬·중복제거**(non-mono 복구)
    - **RGB/depth CCW 90° 회전**(upright, shape 720×960 / 192×256) — `move260626_preprocess.txt`
+   - ★ **RGB 와 depth 를 같은 shape 으로 맞춰야 한다** (2026-07-17 확인) — raw 는 720×960 / 192×256 으로
+     **해상도가 다르다**(Record3D 기기 특성). 그대로 두면 두 곳에서 터진다:
+       · `validate_features` — *"we expect all image shapes to match"* (우리 `configuration_umidiffusion.py:332`)
+       · `torch.stack([...], dim=-4)` — 카메라 축을 쌓을 때 (우리 `modeling_umidiffusion.py:183/201`)
+     lerobot_hong 은 **256×256 으로 통일**했다 (실측: `move260626_rel_clean_rm5` 의 rgb/depth 둘 다 `(256,256,3)`).
+     우리 metaworld 는 240×240 **단일 카메라**라 이 제약에 안 걸렸다 — **UMI 에서 처음 걸린다**.
    - **`skip_episodes`**(pose_jump ∪ rgb_nonmono)
 4. [ ] **브릿지**: inspector `issues.json` → `config.yaml` 자동(`skip`, `target_fps`) → 사람 리뷰
 5. [ ] 설치: `pip install h5py` + 컨버터 editable
