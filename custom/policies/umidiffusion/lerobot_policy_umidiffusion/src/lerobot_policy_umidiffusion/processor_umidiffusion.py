@@ -1,7 +1,7 @@
-"""MyPolicy pre/post processor — step 들을 pipeline 에 **끼우는 역할만** (dev_plan §9.5).
+"""UmiDiffusion pre/post processor — step 들을 pipeline 에 **끼우는 역할만** (dev_plan §9.5).
 
 ■ 이 파일의 책임 경계
-    steps.py (robot_maps)  = 순수 변환 로직 + 앵커 의미
+    steps.py               = 순수 변환 로직 + 앵커 의미
     이 파일                 = pipeline 조립                <- 여기
   변환 수학을 여기 직접 쓰지 말 것. 재사용성·역할 분리(§9.5).
 
@@ -32,13 +32,13 @@ from lerobot.processor.core import EnvTransition, TransitionKey
 from lerobot.processor.pipeline import ProcessorStep
 from lerobot.utils.constants import POLICY_POSTPROCESSOR_DEFAULT_NAME, POLICY_PREPROCESSOR_DEFAULT_NAME
 
-from lerobot_processor_robot_maps.steps import (
+from .steps import (
     CanonicalPoseToActionPoseReprStep,
     CanonicalPoseToRelativeObservationStep,
 )
 
-from custom.common.lerobot_ext_core import keys
-from .configuration_mypolicy import MyPolicyConfig
+from lerobot_canonical import keys
+from .configuration_umidiffusion import UmiDiffusionConfig
 
 
 @dataclass
@@ -73,8 +73,8 @@ class DropObservationKeysProcessorStep(ProcessorStep):
         return {"keys": list(self.keys)}
 
 
-def make_mypolicy_pre_post_processors(
-    config: MyPolicyConfig,
+def make_umidiffusion_pre_post_processors(
+    config: UmiDiffusionConfig,
     dataset_stats: dict[str, dict[str, torch.Tensor]] | None = None,
 ) -> tuple[
     PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],

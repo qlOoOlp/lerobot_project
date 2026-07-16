@@ -43,8 +43,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.envs.metaworld import MetaworldEnv
 
-from custom.common.lerobot_ext_core import keys
-from custom.common.lerobot_ext_core.schemas import canonical_ee10 as sch
+from lerobot_canonical import keys
+from lerobot_canonical.schemas import canonical_ee10 as sch
 from custom.envs.metaworld.canonical import (
     PICK_PLACE_GRIPPER_THRESHOLD,
     render_frame,

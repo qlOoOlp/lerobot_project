@@ -3,7 +3,7 @@
 ■ 이 층의 책임 (dev_plan §7.3/§9.5)
     codec(schemas/canonical_ee10_se3.py) = 순수 변환 수학       <- 여기서 import
     이 파일                              = **앵커 의미** + Step 래퍼
-    processor_mypolicy.py                = pipeline 조립만
+    processor_umidiffusion.py                = pipeline 조립만
 
 ■ ★ 왜 런타임인가 (dev_plan §3.2)
     "relative/delta 는 frame 의 고정 속성이 아니라 **sample window 의 anchor 에 종속된 표현**"
@@ -33,8 +33,8 @@ from lerobot.processor.core import EnvTransition, TransitionKey
 from lerobot.processor.pipeline import ProcessorStep
 from lerobot.utils.constants import ACTION, OBS_STATE
 
-from custom.common.lerobot_ext_core.schemas import canonical_ee10 as sch
-from custom.common.lerobot_ext_core.schemas.canonical_ee10_se3 import (
+from lerobot_canonical.schemas import canonical_ee10 as sch
+from lerobot_canonical.schemas.canonical_ee10_se3 import (
     pose9d_to_transform,
     relative_transform,
     transform_to_pose9d,
@@ -72,7 +72,7 @@ class CanonicalPoseToRelativeObservationStep(ProcessorStep):
       - **결과의 마지막 프레임 pose 는 항상 (0,0,0, 1,0,0,0,1,0)** (anchor⁻¹@anchor = I).
         정보량 0이지만 정상 — 정보는 이전 히스토리 프레임과 이미지에 있다.
       - `state.ndim != 3` 이면 ValueError. AddBatchDimension 뒤에 놓여야 (B,T,10) 이 보장된다
-        => pipeline 순서 의존성 (processor_mypolicy.py 참고).
+        => pipeline 순서 의존성 (processor_umidiffusion.py 참고).
       - state_key 가 observation 에 없으면 **그냥 통과**시킨다(방어적).
       - obs_pose_repr 은 "relative" 만 지원 — config __post_init__ 에서 이미 막는다.
     """

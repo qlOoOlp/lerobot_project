@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot_canonical"
+version = "0.1.0"
+description = "Canonical representation for LeRobot extensions: dataset keys + EE-pose 10D schema + SE3 codec"
+requires-python = ">=3.10"
+# 라이브러리이지 플러그인이 아니다 — lerobot 의 자동탐색 접두사
+# (lerobot_robot_/camera_/teleoperator_/policy_) 에 일부러 안 걸린다.
+#   keys.py                : lerobot.utils.constants 사용        -> lerobot
+#   schemas/canonical_ee10_se3.py : 배치 텐서 연산                -> torch
+dependencies = ["lerobot", "torch"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["lerobot_canonical*"]

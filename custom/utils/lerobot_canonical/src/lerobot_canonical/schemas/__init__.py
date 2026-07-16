@@ -12,7 +12,7 @@ representations by changing only the import:
     STATE_DIM, STATE_AXES, ACTION_DIM, ACTION_AXES     # outward contract
     (POSE_DIM / JOINT_DIM ... are representation-internal)
 
-    from custom.common.lerobot_ext_core.schemas import canonical_ee10 as sch
+    from lerobot_canonical.schemas import canonical_ee10 as sch
     sch.STATE_DIM
 
 New representation (e.g. joint-space) -> add a sibling module here

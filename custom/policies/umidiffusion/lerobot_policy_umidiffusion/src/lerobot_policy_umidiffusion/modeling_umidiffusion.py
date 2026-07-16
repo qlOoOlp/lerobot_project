@@ -1,26 +1,26 @@
-"""MyPolicy 모델 — default DiffusionPolicy 를 최대한 재사용 (dev_plan §12.3).
+"""UmiDiffusion 모델 — default DiffusionPolicy 를 최대한 재사용 (dev_plan §12.3).
 
 ■ 이 파일이 짧아야 정상이다
   모델 구조를 바꾸는 게 목적이 아니다. custom policy 의 존재 이유는 **런타임 pose step 을
   processor 에 끼우는 것**(dev_plan §12.1)이지 네트워크가 아니다.
-  lerobot_hong 의 modeling_mypolicy.py 도 251B(4줄)뿐이었다.
+  lerobot_hong 의 modeling_umidiffusion.py 도 251B(4줄)뿐이었다.
 
 ■ 최소 연결값 (dev_plan §12.3)
-    config_class = MyPolicyConfig
-    name = "mypolicy"          <- 플러그인 폴백이 이 이름으로 찾는다
+    config_class = UmiDiffusionConfig
+    name = "umidiffusion"          <- 플러그인 폴백이 이 이름으로 찾는다
 """
 from __future__ import annotations
 
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 
-from .configuration_mypolicy import MyPolicyConfig
+from .configuration_umidiffusion import UmiDiffusionConfig
 
 
-class MyPolicyPolicy(DiffusionPolicy):
-    config_class = MyPolicyConfig
-    name = "mypolicy"
+class UmiDiffusionPolicy(DiffusionPolicy):
+    config_class = UmiDiffusionConfig
+    name = "umidiffusion"
 
-    def __init__(self, config: MyPolicyConfig, *args, **kwargs) -> None:
+    def __init__(self, config: UmiDiffusionConfig, *args, **kwargs) -> None:
         """★ super() **직전**에 config.apply_depth_gate() 를 호출한다.
 
         ■ 왜 하필 여기인가
@@ -36,10 +36,11 @@ class MyPolicyPolicy(DiffusionPolicy):
           - config 를 in-place 로 수정하므로, 체크포인트 저장 시 필터된 input_features 가
             함께 저장된다 -> 로드 시 자동 일관.
         """
-        ...  # 구현 ①
+        config.apply_depth_gate()
+        super().__init__(config, *args, **kwargs)
 
 
-# lerobot_hong 호환 별칭 (dev_plan §12.3 은 `MyPolicy` 를 export 하라고 함)
-MyPolicy = MyPolicyPolicy
+# lerobot_hong 호환 별칭 (dev_plan §12.3 은 `UmiDiffusion` 를 export 하라고 함)
+UmiDiffusion = UmiDiffusionPolicy
 
-__all__ = ["MyPolicyPolicy", "MyPolicy"]
+__all__ = ["UmiDiffusionPolicy", "UmiDiffusion"]

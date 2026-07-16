@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import torch
 
-from custom.common.lerobot_ext_core.schemas import canonical_ee10 as sch
+from lerobot_canonical.schemas import canonical_ee10 as sch
 
 
 def rot6d_to_rotation_matrix(rot6d: torch.Tensor) -> torch.Tensor:

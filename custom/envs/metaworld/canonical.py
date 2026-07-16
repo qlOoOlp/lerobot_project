@@ -56,9 +56,9 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from custom.common.lerobot_ext_core.schemas import canonical_ee10 as sch
+from lerobot_canonical.schemas import canonical_ee10 as sch
 
-# Meta-World env facts (NOT representation facts -> they live here, not in ext_core)
+# Meta-World env facts (NOT representation facts -> they live here, not in lerobot_canonical)
 STATE4_DIM: int = 4       # env obs prefix: [ee_x, ee_y, ee_z, gripper]
 ENV_ACTION_DIM: int = 4   # env action: [dx, dy, dz, closing_effort]
 
