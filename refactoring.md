@@ -306,9 +306,10 @@ output_steps = [Unnormalizer, Device(cpu)]
    - ★ **역변환 필수**: 정책은 **relative 를 뱉는다**. `decode_policy_action(raw, anchor_state=canonical_window[OBS_STATE][-1], action_pose_repr=policy.config.action_pose_repr)` 로 **절대 canonical 로 되돌린 뒤** `canonical10_to_env_action` 에 넣는다. 빠뜨리면 **완전히 틀린 명령** (retargeting.md 6절)
    - 참고: lerobot_hong `rollout_metaworld_umidiffusion.py:98` 이 정확히 이 형태 — 그대로 따름
    - ★ **Phase 1 의 세 함수를 그대로 재사용**: `render_frame` / `state4_to_canonical10` / `canonical10_to_env_action` (`custom/envs/metaworld/canonical.py`)
-   - ★ **Phase 1 과 같은 상수를 넘길 것** — 어긋나면 train≠inference:
-     - `gripper_threshold = PICK_PLACE_GRIPPER_THRESHOLD` (0.7) — 수집 때 데이터셋에 bake 된 값
-     - `xyz_scale = ENV_XYZ_SCALE` (0.01) — env 상수. **데이터 통계(p95=0.013 등)로 잡지 말 것** (retargeting.md 5절: 0.0155→35% 미달 / 0.004→항상 클립)
+   - ★ **Phase 1 과 같은 상수를 넘길 것** — 어긋나면 train≠inference (셋 다 조용히 실패한다):
+     - `gripper_threshold = PICK_PLACE_GRIPPER_THRESHOLD` (0.7) — **태스크 의존**. 수집 때 데이터셋에 bake 된 값
+     - `xyz_scale = ENV_XYZ_SCALE` (0.01) — **태스크 무관**(env 상수). **데이터 통계(p95=0.013 등)로 잡지 말 것** (retargeting.md 5절: 0.0155→35% 미달 / 0.004→항상 클립)
+     - **카메라 = `corner2`** — **카메라 의존**(`FLIP_CAMERAS`). 넘기는 게 아니라 **같은 카메라로 env 를 만들면** 된다: `render_frame` 이 `env.camera_name` 을 읽어 스스로 가드하므로 desync 가 불가능하다. 다른 카메라로 만들면 flip 이 자동으로 안 걸리는데, 그건 맞는 동작이지만 **시점 자체가 학습 데이터와 달라진다**
    - eval seed 는 **0~9** 사용 (수집이 `seed_base=100` 이라 홀드아웃됨)
 4. [ ] **검증**: 1 에피소드 rollout → 성공률/영상. **여기까지 = metaworld 코어 루프(데이터→학습→eval) 완성**
    - 정책의 그리퍼 출력은 **{0,1} 이진**이어야 자연스러움 (데이터가 이진) → `(0.5−o)×2` 로 `±1` 명령

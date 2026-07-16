@@ -212,10 +212,20 @@ Phase 1 산출물: `~/datasets/metaworld_canonical/pick_place_v3_bin` — **300e
 **env 사실은 여기 / 표현 사실은 `lerobot_canonical`**:
 ```python
 STATE4_DIM = ENV_ACTION_DIM = 4          # metaworld 의 사실
-ENV_XYZ_SCALE = 0.01                     # env 의 action_scale (태스크 무관)
-PICK_PLACE_GRIPPER_THRESHOLD = 0.7       # 태스크 의존 (재실측 필요)
+ENV_XYZ_SCALE = 0.01                     # env 의 action_scale        (태스크 무관)
+PICK_PLACE_GRIPPER_THRESHOLD = 0.7       # obs[3] 이중봉우리 분리점    (태스크 의존 — 재실측 필요)
+FLIP_CAMERAS = frozenset({"corner2"})    # 180° 굴러 장착된 카메라     (카메라 의존)
 sch.STATE_DIM, sch.POSE_DIM, sch.IDENTITY_ROT6D   # lerobot_canonical 에서 import
 ```
+> **상수의 세 축**이 각각 다르다 — 무엇이 바뀌면 재실측/재수집인지가 다르기 때문:
+> 태스크 무관(env 상수) / 태스크 의존(물체 두께 바뀌면 재실측) / 카메라 의존(카메라 갈면 달라짐).
+
+**`FLIP_CAMERAS` — flip 은 카메라의 성질이지 metaworld 의 성질이 아니다**
+- 근거: `assets/objects/assets/xyz_base.xml` 의 `<camera name="corner2" ... euler="3.9 2.3 0.6"/>` — 180°를 넘겨 굴러 있어 mujoco 가 거꾸로 된 장면을 충실히 렌더한다. 실측: raw 는 **테이블이 천장에 매달림** (`tmp/real/corner2_{raw,flipped}.png`)
+- `np.flip(img,(0,1))` 은 거울상이 아니라 **180° 회전** = 장착 각도 되돌리기. 그래서 **수집·rollout 양쪽**에 걸린다 — 카메라는 계속 뒤집힌 프레임을 뱉으니 읽을 때마다 같은 보정이 필요하다. *"데이터셋에 이미 flip 이 있으니 rollout 에선 건너뛰자"* 는 **똑바른 그림으로 학습한 정책에 거꾸로 된 그림을 먹이는 것**
+- 형제 카메라는 정의가 다르다(`behindGripper quat="0 1 0 0"` 등) → **무조건 flip 은 버그**. lerobot 도 같은 가드를 함(`envs/metaworld.py:147`)
+- 카메라 이름은 **인자가 아니라 `env.camera_name` 에서 읽는다** — env 가 이미 아는 사실이라 실제 렌더되는 카메라와 **desync 가 불가능**. (반면 `gripper_threshold`/`xyz_scale` 은 env 가 모르는 **우리 결정**이라 넘긴다.) 속성이 없으면 조용히 넘어가지 않고 `ValueError`
+- ⚠ `corner2 ∈ FLIP_CAMERAS` 라 **기존 300ep 데이터셋은 재수집 불필요** — 픽셀 단위 동일 검증됨
 
 ### `scripts/sim/collect_metaworld.py` — port_droid 패턴 (Robot 없음)
 `build_features` → `LeRobotDataset.create` → `collect_episode` → `to_canonical_and_actions` → `add_frame` 루프 → `save_episode` → `finalize`.
