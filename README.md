@@ -8,9 +8,9 @@
 > 설계·Phase 계획: [refactoring.md](refactoring.md) · embodiment↔canonical 번역 계약: [retargeting.md](retargeting.md) · 구현 동작 상세: [information.md](information.md)
 
 **진행 상황**: Phase 0(환경) ✅ · **Phase 1(데이터) ✅** (수집 코드 — canonical 10D, 이진 그리퍼, 80fps) ·
-**Phase 2(정책) 진행 중** — 2-0/2-1 ✅, 다음 = 2-2 파이프라인 조립
-> ⏳ 데이터셋은 **재수집 필요**: 옛 산출물이 시딩 함정(`reset(seed=)` 무시)으로 재현 불가라 삭제했다.
-> 코드는 고쳐졌고 `--seed-base` 가 이제 실제로 작동한다 — 수집 명령은 refactoring.md Phase 1 참고.
+**Phase 2(정책) ✅** — 2-0~2-7 전부 완료 (anchor-relative 런타임 프로세서 + depth 게이트, lerobot 무수정) · 다음 = Phase 4(학습)
+> 데이터셋: `~/datasets/metaworld_canonical/pick_place_v4` (300ep / 16,420프레임). 시딩 함정
+> (`reset(seed=)` 무시)을 고친 뒤 재수집한 것이라 **같은 명령 = 같은 데이터셋**이 보장된다.
 
 ## 디렉토리 구조
 

@@ -229,10 +229,16 @@ output_steps = [Unnormalizer, Device(cpu)]
    - ⚠ **여기서 "0-patch 첫 실증" 이라고 단언했던 것은 과장이었다.** `lerobot-train` 이 완주한 것은
      **정책 발견 경로**만 증명한다. 프로세서 발견 경로는 확인하지 않았고, 실제로는 깨져 있었다
      (우리 함수 본문이 `...`=None 인데도 정상 반환 = 한 번도 안 불림). **검증한 범위만 주장할 것.**
-2. [ ] **2-2 파이프라인 조립** — `make_umidiffusion_pre_post_processors`, **lerobot 기본 step 만** (Rename/AddBatch/Device/Normalizer)
+2. [x] **2-2 파이프라인 조립** ✅ (2026-07-17) — `make_umidiffusion_pre_post_processors`, **lerobot 기본 step 만** (Rename/AddBatch/Device/Normalizer)
    - 배우는 것: `PolicyProcessorPipeline` 구조, step 순서, feature 계약, post 의 `to_transition`/`to_output`
    - 이름 고정 — `_make_processors_from_policy_config` 폴백이 컨벤션으로 찾음
-   - 검증: `pre(sample) → select_action → post(action)` end-to-end
+   - ★ **`PolicyProcessorPipeline` 은 타입 별칭** — `DataProcessorPipeline[TInput,TOutput]`(`pipeline.py:1436`)
+   - ★ **Normalizer 는 input+output 합집합 / Unnormalizer 는 output 만** — 학습 batch 엔 action 라벨도 있으므로
+   - ★ **post 만 `to_transition`/`to_output` 필수** — 기본값이 `batch_to_transition`(dict 가정)이라
+     `PolicyAction`(텐서)를 받는 post 에선 **조용히 틀린다**
+   - ✅ **결과**: lerobot `processor_diffusion.py:65-92` 와 **완전히 동일**(2-2 의 정답은 원본 그대로) ·
+     `post.to_output == transition_to_policy_action` 확인 · Normalizer features {action, rgb, state} vs
+     Unnormalizer {action} 비대칭 확인 · 데이터 통과 확인
 3. [x] **2-3 우리 step 껍데기** ✅ (2026-07-17) — 2개 step 을 **pass-through(항등)** 로 만들어 파이프라인에 끼움
    - 배우는 것: `ProcessorStep` 규약(**추상은 `__call__` + `transform_features` 둘뿐** — 나머지 `get_config`/`reset`/`state_dict`/`load_state_dict`/`transition` 은 기본 구현 있음), `@ProcessorStepRegistry.register`, **파이프라인 순서 의존성**
    - ★ **action step 이 obs step 보다 먼저** — 앵커로 쓸 `state` 가 아직 **절대**여야 한다. 뒤집으면 이미 relative 가 된 state(마지막=항등)를 앵커로 삼아 **전부 망가짐**
