@@ -75,12 +75,41 @@ class CanonicalPoseToRelativeObservationStep(ProcessorStep):
         => pipeline 순서 의존성 (processor_umidiffusion.py 참고).
       - state_key 가 observation 에 없으면 **그냥 통과**시킨다(방어적).
       - obs_pose_repr 은 "relative" 만 지원 — config __post_init__ 에서 이미 막는다.
+
+    ■ ★ (B, T, 10) 은 누가 만드나 — 학습/추론이 다르다
+        학습  : DataLoader 가 delta_timestamps 로 윈도우를 잘라 (B, T, 10) 로 준다.
+        추론  : 정책의 _queues stack 은 predict_action_chunk **안**에서 일어나므로
+                프로세서보다 **뒤**다. select_action() 을 쓰면 이 step 은 (B, 10) 을 받아
+                앵커를 만들 수 없다.
+                => rollout 이 **자체 히스토리 버퍼**로 (B, T, 10) 을 만들어 preprocessor 에
+                   넘기고, select_action() 대신 policy.diffusion.generate_actions() 를
+                   직접 불러야 한다. lerobot_hong rollout_metaworld_mypolicy.py:83-93 이
+                   정확히 이 형태다. 아래 ndim 검사가 그 계약을 강제한다. (Phase 5)
     """
 
     state_key: str = OBS_STATE
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
-        ...  # 구현 ②
+        observation = transition.get(TransitionKey.OBSERVATION)
+        if not isinstance(observation, dict) or self.state_key not in observation:
+            # 방어적: state 가 없는 transition 은 우리 관심사가 아니다.
+            return transition
+
+        state = observation[self.state_key]
+        if state.ndim != 3:
+            raise ValueError(
+                f"Expected `{self.state_key}` to be (B, T, {sch.STATE_DIM}) after batching, "
+                f"got shape {tuple(state.shape)}. This step must run after "
+                f"AddBatchDimensionProcessorStep, and at rollout the caller must supply an "
+                f"observation window (see the class docstring)."
+            )
+        if state.shape[-1] != sch.STATE_DIM:
+            raise ValueError(
+                f"Expected `{self.state_key}` trailing dim {sch.STATE_DIM}, got {tuple(state.shape)}."
+            )
+
+        # ── 2-5 에서 여기에 anchor-relative 변환이 들어온다. 지금은 항등(pass-through). ──
+        return transition
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
@@ -128,11 +157,52 @@ class CanonicalPoseToActionPoseReprStep(ProcessorStep):
     state_key: str = OBS_STATE
 
     def __post_init__(self) -> None:
-        """action_pose_repr 이 {"relative","delta"} 인지 검증 → 아니면 ValueError."""
-        ...  # 구현 ③
+        """action_pose_repr 이 {"relative","delta"} 인지 검증 → 아니면 ValueError.
+
+        config.__post_init__ 에도 같은 검증이 있다. 중복이 아니라 **각자 필요**하다 —
+        이 step 은 config 없이 직접 만들어질 수 있기 때문(ProcessorStepRegistry 역직렬화:
+        체크포인트가 get_config() 의 dict 를 그대로 생성자에 넣는다).
+        """
+        if self.action_pose_repr not in {"relative", "delta"}:
+            raise ValueError(
+                f'`action_pose_repr` must be one of {{"relative", "delta"}}. Got {self.action_pose_repr}.'
+            )
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
-        ...  # 구현 ④
+        action = transition.get(TransitionKey.ACTION)
+        if action is None:
+            # ★ 추론엔 action 이 없다 (정답을 모르니 정책을 돌린다). 빠뜨리면 Phase 5 에서 터진다.
+            return transition
+
+        observation = transition.get(TransitionKey.OBSERVATION)
+        if not isinstance(observation, dict) or self.state_key not in observation:
+            # 앵커를 '관측'에서 가져오므로 observation 이 없으면 변환 자체가 불가능하다.
+            # 관측 step 과 달리 조용히 통과시키면 안 된다 — 액션만 절대로 남아 학습이 조용히 깨진다.
+            raise ValueError(
+                f"`{type(self).__name__}` needs `{self.state_key}` in the observation to build the "
+                f"anchor, but got {type(observation).__name__}. It must run inside the policy "
+                f"preprocessor, not standalone."
+            )
+
+        if action.ndim != 3:
+            raise ValueError(
+                f"Expected `action` to be (B, H, {sch.ACTION_DIM}) after batching, "
+                f"got shape {tuple(action.shape)}."
+            )
+        if action.shape[-1] != sch.ACTION_DIM:
+            raise ValueError(
+                f"Expected `action` trailing dim {sch.ACTION_DIM}, got {tuple(action.shape)}."
+            )
+
+        state = observation[self.state_key]
+        if state.shape[0] != action.shape[0]:
+            raise ValueError(
+                f"Batch size mismatch: `{self.state_key}` has {state.shape[0]}, "
+                f"`action` has {action.shape[0]}."
+            )
+
+        # ── 2-5 에서 여기에 relative/delta 변환이 들어온다. 지금은 항등(pass-through). ──
+        return transition
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]

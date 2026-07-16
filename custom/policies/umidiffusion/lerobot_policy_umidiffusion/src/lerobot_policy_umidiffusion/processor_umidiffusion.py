@@ -111,4 +111,40 @@ def make_umidiffusion_pre_post_processors(
         VISUAL 은 필요. make_policy 가 ds_meta.stats 를 넘겨준다.
       - post pipeline 은 to_transition/to_output 을 지정해야 PolicyAction <-> transition 변환이 된다.
     """
-    ...  # 구현 ②
+
+    input_steps = [
+        RenameObservationsProcessorStep(rename_map={}),
+        AddBatchDimensionProcessorStep(),
+        # ★★ 순서 고정: action step 이 obs step 보다 **먼저**.
+        #    액션 step 이 앵커로 쓰는 state 가 아직 '절대'여야 하기 때문. 뒤집으면 obs step 이
+        #    state 를 relative 로 바꿔 마지막 프레임이 항등(0,0,0,1,0,0,0,1,0)이 되고, 액션 step 이
+        #    그 항등을 앵커로 삼아 **액션이 전혀 변환되지 않는다** — 에러 없이 전부 망가진다.
+        #    지금은 둘 다 항등(2-3)이라 순서가 결과를 안 바꾸지만, 2-5 에서 수학이 들어오는
+        #    순간 이 순서가 정답과 재앙을 가른다.
+        CanonicalPoseToActionPoseReprStep(action_pose_repr=config.action_pose_repr),
+        CanonicalPoseToRelativeObservationStep(),
+        DeviceProcessorStep(device=config.device),
+        NormalizerProcessorStep(
+            features={**config.input_features, **config.output_features},
+            norm_map=config.normalization_mapping,
+            stats=dataset_stats,
+        ),
+    ]
+    output_steps = [
+        UnnormalizerProcessorStep(
+            features=config.output_features, norm_map=config.normalization_mapping, stats=dataset_stats
+        ),
+        DeviceProcessorStep(device="cpu"),
+    ]
+    return (
+        PolicyProcessorPipeline[dict[str, Any], dict[str, Any]](
+            steps=input_steps,
+            name=POLICY_PREPROCESSOR_DEFAULT_NAME,
+        ),
+        PolicyProcessorPipeline[PolicyAction, PolicyAction](
+            steps=output_steps,
+            name=POLICY_POSTPROCESSOR_DEFAULT_NAME,
+            to_transition=policy_action_to_transition,
+            to_output=transition_to_policy_action,
+        ),
+    )

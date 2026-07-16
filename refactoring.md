@@ -233,10 +233,32 @@ output_steps = [Unnormalizer, Device(cpu)]
    - 배우는 것: `PolicyProcessorPipeline` 구조, step 순서, feature 계약, post 의 `to_transition`/`to_output`
    - 이름 고정 — `_make_processors_from_policy_config` 폴백이 컨벤션으로 찾음
    - 검증: `pre(sample) → select_action → post(action)` end-to-end
-3. [ ] **2-3 우리 step 껍데기** — 2개 step 을 **pass-through(항등)** 로 만들어 파이프라인에 끼움
-   - 배우는 것: `ProcessorStep` 6메서드 규약, `@ProcessorStepRegistry.register`, **파이프라인 순서 의존성**
+3. [x] **2-3 우리 step 껍데기** ✅ (2026-07-17) — 2개 step 을 **pass-through(항등)** 로 만들어 파이프라인에 끼움
+   - 배우는 것: `ProcessorStep` 규약(**추상은 `__call__` + `transform_features` 둘뿐** — 나머지 `get_config`/`reset`/`state_dict`/`load_state_dict`/`transition` 은 기본 구현 있음), `@ProcessorStepRegistry.register`, **파이프라인 순서 의존성**
    - ★ **action step 이 obs step 보다 먼저** — 앵커로 쓸 `state` 가 아직 **절대**여야 한다. 뒤집으면 이미 relative 가 된 state(마지막=항등)를 앵커로 삼아 **전부 망가짐**
-   - 검증: 파이프라인이 **여전히** 돌고 **값이 안 변함**(항등이므로) → 배선만 분리 검증됨
+   - ★ **`if action is None: return`** — 추론엔 action 이 없다(정답을 모르니 정책을 돌린다). 빠뜨리면 Phase 5 에서 터짐
+   - ✅ **검증**: 순서(action idx2 < obs idx3) · **항등**(obs/act 통과 전후 완전 동일) · action 없이 통과 ·
+     `ndim!=3` 가드 발화 · `action_pose_repr` 검증 발화 · **레지스트리 왕복**(`get_config()` → 생성자 복원)
+   - ★ **여기서 Phase 5 계약이 드러났다** — 아래 참조
+
+> ### ★ (B, T, 10) 은 누가 만드나 — 학습과 추론이 다르다 (2-3 에서 발견)
+> ```
+> 학습 : DataLoader 가 delta_timestamps 로 윈도우를 잘라 (B, T, 10) 을 준다     → 우리 step OK
+> 추론 : 정책의 _queues stack 은 predict_action_chunk **안**에서 일어난다
+>        = 프로세서보다 **뒤** → select_action() 을 쓰면 우리 step 은 (B, 10) 을 받고
+>        → 앵커 state[:, -1] 을 만들 수 없다
+> ```
+> **Phase 5 rollout 은 `select_action()` 을 쓰면 안 된다.** 대신:
+> ```python
+> window       = buffer.as_window()                       # 자체 히스토리 버퍼로 (T, 10)
+> anchor_state = window[OBS_STATE][-1]                    # 앵커를 여기서 확보
+> processed    = preprocessor(build_model_obs_dict(window))   # pre 에 (B, T, 10) 을 넘김
+> chunk        = policy.diffusion.generate_actions(processed) # ★ select_action 우회
+> action       = decode_policy_action(chunk, anchor_state, action_pose_repr=policy.config.action_pose_repr)
+> ```
+> lerobot_hong `custom/scripts/sim/rollout_metaworld_mypolicy.py:83-98` 이 정확히 이 형태다.
+> 우리 step 의 `ndim != 3` ValueError 가 이 계약을 **강제**한다 — 어기면 조용히 틀리는 대신 터진다.
+> (관측 히스토리 버퍼는 Phase 7 의 `runtime_buffer` 와 같은 물건 — 그때 공유 검토)
 4. [ ] **2-4 표현 codec** — `schemas/canonical_ee10_se3.py`: `rot6d↔R`, `pose9d↔transform`, `invert_transform`, `relative_transform` (torch, 배치 `...`)
    - 배우는 것: rot6d 를 쓰는 이유(연속성), **SE3 역변환은 `R^T`**(일반 `inv` 금지 — lerobot_hong 이 그 실수), 좌표계 상쇄
    - **표현 옆에 두는 이유·lerobot_hong 중복 증거**: 부록 D.5
@@ -328,6 +350,9 @@ output_steps = [Unnormalizer, Device(cpu)]
    - ⚠ **factory 우회 필수(무수정)**: lerobot `envs/factory.py` 의 `make_env_pre_post_processors` 는 LIBERO/Isaaclab 을 **하드코딩 if** 로 붙임 → metaworld 를 같은 식으로 넣으려면 factory 패치 필요 = **0-patch 위반**
    - → 우리 rollout 스크립트에서 **직접 조립**: `PolicyProcessorPipeline(steps=[MetaworldCanonicalStep()])` (공개 API만 사용). metaworld 는 factory 기본값이 어차피 identity 라 잃는 것 없음
 3. [ ] rollout 루프: `env.step()→env_proc→policy_pre→policy→policy_post→**decode_policy_action**→env_proc→env.step()`
+   - ★ **`select_action()` 을 쓰지 말 것** — 정책의 큐 stack 이 프로세서보다 뒤라 우리 relative step 이
+     `(B,10)` 을 받아 **앵커를 못 만든다**(`ndim!=3` ValueError). 자체 히스토리 버퍼로 `(B,T,10)` 을 만들어
+     `preprocessor` 에 넘기고 `policy.diffusion.generate_actions()` 를 직접 부른다. 근거·코드: **2-3 절**
    - ★ **역변환 필수**: 정책은 **relative 를 뱉는다**. `decode_policy_action(raw, anchor_state=canonical_window[OBS_STATE][-1], action_pose_repr=policy.config.action_pose_repr)` 로 **절대 canonical 로 되돌린 뒤** `canonical10_to_env_action` 에 넣는다. 빠뜨리면 **완전히 틀린 명령** (retargeting.md 6절)
    - 참고: lerobot_hong `rollout_metaworld_umidiffusion.py:98` 이 정확히 이 형태 — 그대로 따름
    - ★ **Phase 1 의 세 함수를 그대로 재사용**: `render_frame` / `state4_to_canonical10` / `canonical10_to_env_action` (`custom/envs/metaworld/canonical.py`)
