@@ -5,19 +5,30 @@
 **lerobot 본체는 완전 무수정(0-patch)** 으로 유지한다. metaworld 로 코어 루프(데이터→학습→eval)를
 먼저 완성하고 같은 canonical 스키마(10D `[xyz, rot6d, gripper]`)로 UMI 를 확장한다.
 
-> 설계·단계별 계획: [refactoring.md](refactoring.md) · 구현 동작 상세: [information.md](information.md)
+> 설계·Phase 계획: [refactoring.md](refactoring.md) · embodiment↔canonical 번역 계약: [retargeting.md](retargeting.md) · 구현 동작 상세: [information.md](information.md)
+
+**진행 상황**: Phase 0(환경) ✅ · **Phase 1(데이터) ✅** — `~/datasets/metaworld_canonical/pick_place_v3_bin` (300ep / 16,370프레임, canonical 10D, 이진 그리퍼) · 다음 = Phase 2(정책)
 
 ## 디렉토리 구조
 
 ```
 lerobot_share/
-├── lerobot/      # HF lerobot v0.4.4 — 별도 clone (git 무시, 벤더링 안 함)
-├── custom/       # lerobot 플러그인/변환 코드 (policy·processor·data_processing)
-├── tools/        # 독립 유틸 (raw_inspect.py 등)
-├── patches/      # fallback 참고용 (기본은 무수정 → apply 하지 않음)
-├── outputs/      # 실행 산출물 (로그·gif·체크포인트) — git 무시
-├── refactoring.md
-└── information.md
+├── lerobot/                    # HF lerobot v0.4.4 — 별도 clone (git 무시, 벤더링 안 함)
+├── custom/                     # lerobot 플러그인/확장 코드
+│   ├── common/lerobot_ext_core/
+│   │   ├── keys.py             #   데이터셋 키 (lerobot 상수에서 파생)
+│   │   └── schemas/            #   표현별 모듈 하나씩 (재노출 없음)
+│   │       └── canonical_ee10.py   #   EE-pose 10D [xyz, rot6d, gripper]
+│   └── envs/metaworld/
+│       ├── canonical.py        #   env 어댑터 — 수집·rollout 공유(train==inference)
+│       └── collect.py          #   수집 스크립트 (port_droid 패턴, Robot 없음)
+├── tools/                      # 독립 유틸 (raw_inspect.py 등)
+├── patches/                    # fallback 참고용 (기본은 무수정 → apply 하지 않음)
+├── outputs/                    # 실행 산출물 (로그·리포트) — git 무시
+├── tmp/real/                   # 검증 산출물 (gif 등) — git 무시
+├── refactoring.md              # 계획·Phase 순서·아키텍처
+├── retargeting.md              # embodiment ↔ canonical 번역 계약
+└── information.md              # 구현 동작 상세
 ```
 
 ## 사전 준비

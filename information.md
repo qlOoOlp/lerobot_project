@@ -125,6 +125,92 @@ python tools/data_processing/raw_inspect.py --raw-root <경로> --target-fps 30 
 
 ---
 
+## 1.2 `lerobot_ext_core` — 공유 어휘 (키 + 표현)
+
+`custom/common/lerobot_ext_core/` — 여러 컨버터·정책·프로세서가 공유하는 **이름표와 치수만**. 로직 없음.
+
+```
+lerobot_ext_core/
+├── keys.py                    # 표현 무관 — 모든 표현이 공유
+└── schemas/
+    ├── __init__.py            # "표현마다 모듈 하나" 규약 문서화. 재노출 없음
+    └── canonical_ee10.py      # EE-pose 10D 표현 하나
+```
+
+### `keys.py` — lerobot 상수에서 **파생**
+`image_key(cam)` = `f"{OBS_IMAGES}.{cam}"` / `RGB_KEY`·`DEPTH_KEY` = 그 헬퍼로 조립 / `STATE_KEY`·`ACTION_KEY` = `OBS_STATE`·`ACTION` **별칭**.
+→ 파일 안에 `"observation..."` 문자열 리터럴 **0개**. lerobot 이 규약을 바꿔도 자동 추종.
+
+### `schemas/canonical_ee10.py` — 표현 **하나**
+- 차원: `POSE_DIM=9`(xyz3+rot6d6), `GRIPPER_DIM=1`, `STATE_DIM`/`ACTION_DIM` = **파생**(10)
+- 축: `POSE_AXES`(x,y,z,rot6d_0..5), `GRIPPER_AXES`, `STATE_AXES`/`ACTION_AXES` = **파생**
+- 상수: `IDENTITY_ROT6D = (1,0,0,0,1,0)` — 항등회전의 rot6d 인코딩. **tuple** 로 둬 ext_core 를 numpy 의존 없이 유지(소비자가 `np.asarray`)
+- **채널 의미**(정본): xyz [m, **절대**] / rot6d = 회전행렬 앞 두 열 flatten / **gripper = openness [0,1], 0=닫힘 1=열림**
+  - **10개 숫자 = 7자유도** (위치3 + 회전3 + 그리퍼1). rot6d 가 3자유도를 6개로 **과표현**하는 건 연속성을 사기 위함 — 오일러(짐벌락)·쿼터니언(`q`/`−q` 이중덮개)은 불연속이라 신경망 학습이 찢어짐. 아무 6개 숫자든 Gram-Schmidt 가 유효 회전으로 만들어줌
+  - `c3` 를 버려도 되는 이유: R 이 직교행렬이라 `c3 = c1 × c2` 로 복원 → **정보 손실 0**
+  - **state·action 둘 다 절대값**(delta 아님). `action[t] = state[t+1]`. delta 는 env 경계에서만 → 근거·실측: `retargeting.md` 1·5절
+
+### 설계 규칙 (실전에서 벼려진 것)
+| 규칙 | 이유 |
+|---|---|
+| **primitive vs derived** — `STATE_DIM = POSE_DIM + GRIPPER_DIM` | 근원 한 곳만 고치면 파생이 따라옴. `10` 을 여섯 군데 하드코딩하면 표현 바꿀 때 조용한 불일치 |
+| schema 는 **로봇이 아니라 표현**에 종속 | Sawyer·franka·UMI 가 같은 EE-pose 표현 공유 → 로봇 교체 시 재사용. **표현** 변경 시에만 새 모듈 |
+| 새 표현은 `schemas/` 안 **sibling** 추가 | 기존 모듈 불변(open/closed). 대외 계약(`STATE_DIM`/`STATE_AXES`/`ACTION_*`)만 맞추면 다운스트림이 모듈만 갈아끼움 |
+| **재노출 안 함** | import 가 항상 명시적 → 어떤 모듈도 "the schema" 행세 못 함 |
+| **feature 빌더는 여기 두지 말 것** | 정책은 데이터셋에서 feature 파생(`dataset_to_policy_features`) → feature dict 는 **데이터 생산자(컨버터)** 책임 |
+
+---
+
+## 1.3 metaworld 수집 (`custom/envs/metaworld/`)
+
+Phase 1 산출물: `~/datasets/metaworld_canonical/pick_place_v3_bin` — **300ep / 16,370프레임**, canonical 10D, 이진 그리퍼, 80fps. 번역 계약 전반은 `retargeting.md`.
+
+### `canonical.py` — env 어댑터 (경계를 넘는 것 **전부**)
+| 함수 | 방향 | 핵심 |
+|---|---|---|
+| `render_frame(env, size)` | env 카메라 → 데이터셋 이미지 | corner2 **양축 flip 보정** + resize |
+| `state4_to_canonical10(state4, thresh)` | env obs[:4] (abs) → canonical 10D (abs) | xyz 복사 · `IDENTITY_ROT6D` broadcast · **그리퍼 이진화** |
+| `canonical10_to_env_action(t10, cur, scale)` | canonical (abs) → env 4D (**rel**) | `delta/scale` · 그리퍼 **극성 반전** `(0.5−o)×2` · `[-1,1]` 클립 |
+
+**배치 기준**: 셋 다 **수집·rollout 이 공유** → train==inference 요구가 걸림 → 여기. 수집 전용 로직(`action=다음 state` 라벨링)은 `collect.py`.
+
+**env 사실은 여기 / 표현 사실은 ext_core**:
+```python
+STATE4_DIM = ENV_ACTION_DIM = 4          # metaworld 의 사실
+ENV_XYZ_SCALE = 0.01                     # env 의 action_scale (태스크 무관)
+PICK_PLACE_GRIPPER_THRESHOLD = 0.7       # 태스크 의존 (재실측 필요)
+sch.STATE_DIM, sch.POSE_DIM, sch.IDENTITY_ROT6D   # ext_core 에서 import
+```
+
+### `collect.py` — port_droid 패턴 (Robot 없음)
+`build_features` → `LeRobotDataset.create` → `collect_episode` → `to_canonical_and_actions` → `add_frame` 루프 → `save_episode` → `finalize`.
+
+- **obs 39D 중 앞 4개만** 사용(`ee_xyz` + `gripper`). 나머지 35개는 **특권 정보**(물체·목표 좌표) → 버림. 정책은 **이미지로 추론**해야 실기 이식 가능. (반면 **expert 는 39D 전체**를 봄)
+- **성공 에피소드만** 저장(`info["success"]`)
+- **30% 에피소드에 xyz 노이즈**(`noise_std=0.15`) — 순수 데모는 최적경로만 보여줘 정책이 벗어나면 복구 불가. **그리퍼엔 절대 금지**(무작위 개폐 = 데모 파괴)
+- `seed_base=100` — eval seed 0~9 홀드아웃
+- `action[t] = state[t+1]` (절대 target). 마지막 프레임은 자기 복제
+
+### 실전에서 걸린 함정
+| 함정 | 증상 |
+|---|---|
+| 이미지 feature `names[2]` = `"channel"` | lerobot 이 `(H,W,C)→(C,H,W)` 변환 여부를 **이 값으로 결정**(`datasets/utils.py:724`). 오타 호환 경로라 **`"channels"`** 를 쓸 것. 아니면 정책이 240채널 이미지로 착각 |
+| `env.render(mode=...)` | gymnasium 0.26+ 는 **인자 없음**. `render_mode`/`camera_name` 은 생성 시 고정 |
+| `canonical[-1]` vs `canonical[-1:]` | 축이 사라져 `concatenate` 실패. `("gripper",)` 콤마, `state4[..., 3:4]` 와 같은 함정 |
+| `xyz_scale` 을 데이터 통계로 잡기 | **env 상수(0.01)** 여야 함. 통계는 손의 **지연 응답**이라 gain 이 아님 → retargeting.md 5절 |
+
+### 검증 (Step 5)
+```
+raw_inspect   300ep 80fps 균일 · 10D 일관 · no-warning
+이진 그리퍼    state[9]/action[9] 고유값 {0,1} · 열림 55.5%
+meta.stats    rot6d std=0 (상수, 정상) · gripper mean .555/std .497
+스키마 대조    옛 pick_place_v3_inenv 와 차이 1개: gripper_width → gripper (의도)
+flip 방향     gif 육안 확인 (코드로 검증 불가) → tmp/real/
+```
+> **옛 데이터셋 주의**: `pick_place_v3`·`pick_place_v3_inenv` 는 그리퍼가 **연속**이라 새 규약과 다름. 학습엔 `pick_place_v3_bin` 사용.
+
+---
+
 # 2. Observer (processor 층)
 
 _(구현 예정 — ProcessorStep / Pipeline / 커스텀 Step 동작 기록)_
@@ -177,7 +263,108 @@ def make_mypolicy_pre_post_processors(config, dataset_stats=None):
 - `datasets/factory.py` 패치(depth 미로드)는 효율일 뿐 → 없어도 됨.
 - 추론: 체크포인트의 `use_depth` 가 preprocessor·모델을 자동 일치시킴 → 실기에선 `runtime buffer` 의 `include_depth` 만 맞추면 됨.
 
-→ 이 설계로 **lerobot 패치 2파일(datasets/policies factory) 모두 제거 가능** (refactoring.md Phase 7).
+→ 이 설계로 **lerobot 패치 2파일 모두 제거 가능**. lerobot_hong 실측: `datasets/factory.py`(+15줄) · `policies/factory.py`(+45줄) = **60줄이 전부 depth 필터**였음 (refactoring.md Phase 2 / 부록 D.5).
+
+> ⚠ 정정: 위 "DropObservationKeys 는 정확성엔 불필요" 는 **효율 관점**이고, lerobot_hong 은 실제로 **두 겹**을 다 씀 — config 게이트(모델이 인코더를 안 만들게) + `DropObservationKeysProcessorStep`(관측 dict 에서 실제 제거). Phase 2 에선 둘 다 유지한다.
+
+## 3.2 런타임 프로세서 — 정책이 **앵커 기준 relative** 를 본다 ★
+
+_(구현 예정 — Phase 2. 아래는 lerobot_hong 실측 + dev_plan 근거로 확정된 설계.)_
+
+**custom policy 의 존재 이유** (dev_plan §12.1): *"`policy.type=diffusion` 을 그대로 쓰면 factory 가 기본 processor 를 만든다. 그 기본 processor 에는 **runtime relative/delta pose step 이 없다**."* → 정책과 프로세서는 분리 불가.
+
+### 파이프라인 (lerobot_hong 구조 그대로)
+```python
+input_steps = [Rename, AddBatch,
+               CanonicalPoseToActionPoseReprStep(action_pose_repr),  # 액션 → relative|delta
+               CanonicalPoseToRelativeObservationStep(),             # 관측 → anchor-relative
+               Device, Normalizer]
+# use_depth=False 면 index 1 에 DropObservationKeysProcessorStep 삽입
+output_steps = [Unnormalizer, Device(cpu)]
+```
+
+### 왜 오프라인에 못 굽나 (dev_plan §3.2)
+> *"relative/delta 는 frame 의 고정 속성이 아니라 **sample window 의 anchor 에 종속된 표현**"*
+
+앵커 = **샘플된 윈도우의 마지막 관측**. 학습 때 윈도우를 어디서 자르냐에 따라 달라지므로 **오프라인 고정 저장이 원천 불가**. → 반드시 런타임.
+> **대비**: 그리퍼 이진화는 threshold 가 **고정 상수**라 오프라인 bake 가능(§1.3). **pose 는 앵커 의존이라 불가.** 같은 10D 안에서도 채널마다 처리 원칙이 다른 이유.
+
+### ★ 데이터 비의존성의 수학적 근거
+```
+relative_transform(anchor, state) = anchor⁻¹ @ state
+좌표계 F → T@F 로 바뀌어도:
+  (T@anchor)⁻¹ @ (T@state) = anchor⁻¹ @ T⁻¹ @ T @ state = anchor⁻¹ @ state   ← 동일
+```
+**오프라인 좌표계가 상쇄**되므로 metaworld(월드 절대)·UMI(episode-start 상대)가 **정책에겐 같은 의미**. "정책이 데이터에 의존하면 안 된다"가 이 한 줄로 보장됨.
+
+### 정규화가 IDENTITY 인 이유 (dev_plan §11)
+> *"dataset stats 는 canonical 기준인데 런타임이 relative 로 바꾼다 → canonical stats 를 그대로 쓰면 **표현 공간이 안 맞을 수 있다**"*
+
+→ `STATE=IDENTITY`, `ACTION=IDENTITY`(1차 전략). relative 값은 이미 0 근처라 무방. **부수효과**: metaworld 의 rot6d **std=0 나눗셈도 회피**. 필요 시 relative 기준 stats 를 따로 계산해 확장.
+
+### 세부 규약
+- **pose 9D 만 변환**, gripper 1D 는 그대로 이어붙임 / **차원 유지** 10D→10D (dev_plan §9.4)
+- **`action` 없으면 skip** — eval/추론 raw 관측엔 action 이 없음 (dev_plan §9.3)
+- `obs_pose_repr` 은 `"relative"` 만, `action_pose_repr` 은 `{"relative", "delta"}` (기본 `relative`)
+
+### ★ 역변환 (`decode_policy_action`) — 추론의 필수 절반
+정책은 **relative 를 뱉는다.** 그대로 쓰면 안 되고 **절대로 되돌려야** 한다:
+```python
+canonical_action = decode_policy_action(
+    predicted_action,                                    # relative
+    anchor_state=canonical_window[OBS_STATE][-1],        # 앵커 = 현재 관측
+    action_pose_repr=policy.config.action_pose_repr)     # forward 와 같은 값!
+env_action = canonical_action_to_env_action(canonical_action)
+```
+- `relative`: `base @ action` / `delta`: 누적 적분
+- **파이프라인 밖**: `policy_post` 는 `PolicyAction` 만 받아 **앵커에 접근 불가** → 원본·lerobot_hong 모두 추론 루프가 직접 호출
+- **원본 대조**: UMI `get_real_umi_action` 의 `convert_pose_mat_rep(..., backward=True)` 와 수식 동일
+
+### 두 config 의 역할은 **비대칭**
+| config | 담당 | 방향 |
+|---|---|---|
+| `obs_pose_repr` | 관측만 | **forward 뿐** (정책이 관측을 만들지 않으니 backward 없음) |
+| **`action_pose_repr`** | 액션만 | **forward(학습) + backward(추론) 양쪽에 같은 값** |
+
+forward/backward 가 **같은 repr + 같은 앵커**(`state[:,-1]`)여야 정확한 역함수 → train==inference.
+
+### `relative` vs `delta`
+| | 오차 특성 |
+|---|---|
+| **`relative`**(기본) | 전부 **같은 앵커** 기준 → 한 스텝 틀려도 전파 안 됨 |
+| `delta` | 액션끼리 **연쇄**(backward=누적합) → 한 스텝 틀리면 **이후 전부 오염** |
+
+> ⚠ **원본 UMI 의 버그**: `umi_dataset.py:349` 가 action 변환에 `pose_rep=self.obs_pose_repr` 을 넘긴다(`action_pose_repr` 이어야 함). 기본값이 둘 다 `relative` 라 안 드러나지만 `delta` 로 두면 **학습=relative / 추론=delta** 로 조용히 갈라짐. **lerobot_hong 은 이미 올바르게 고침** → 우리도 그쪽을 따른다.
+
+### 채택하지 않은 것: `_wrt_start` 채널 (원본 UMI 에는 있음)
+
+원본 UMI 의 `shape_meta.obs` 에는 우리에게 없는 채널이 하나 있다:
+```yaml
+robot0_eef_rot_axis_angle_wrt_start:  shape: [6]   # 에피소드 시작 기준 rot6d
+# robot0_eef_pos_wrt_start:           ← 주석 처리(의도적)
+```
+- **무엇**: `relative(episode_start_pose, state)` 의 **회전만**. 학습 시 시작 자세에 노이즈(`N(0, 0.05)`) 주입.
+- **왜 있나**: anchor-relative 는 좌표계를 상쇄하면서 **"지금 세상에서 어느 방향을 보고 있나"** 도 함께 잃는다(앵커 기준으론 항상 항등). `wrt_start` 가 **중력·접근각 같은 절대 방향 기준**을 회전에 한해 되돌려준다.
+- **왜 위치는 빼나**: 위치 `wrt_start` 는 절대 위치 과적합 → 물체가 다른 데 있으면 깨짐. 회전만 주는 게 의도.
+
+**우리는 구현하지 않는다** (metaworld·UMI 둘 다):
+- metaworld 는 **회전 자체가 없어**(Sawyer, rot6d std=0) `wrt_start` 도 항등 상수 → 정보량 0
+- UMI 에서도 **영향이 크지 않다고 판단**
+- lerobot_hong 도 이 채널이 없다(10D) — 이미 떨어뜨린 상태를 물려받음
+
+**나중에 필요해지면**: `observation.environment_state` 슬롯을 쓴다(lerobot 정식 지원 — `global_cond_dim += env_state_feature.shape[0]`, `global_cond_feats.append(batch[OBS_ENV_STATE])`, 없으면 자동 skip). 스키마 분기가 아니라 **옵셔널 채널**이라 데이터셋마다 있어도/없어도 되고, 정책 코드는 그대로다.
+- ⚠ 제약: **저장 차원 = 정책이 보는 차원**. `input_features` 는 `dataset_to_policy_features(ds_meta.features)` 에서 오고 프로세서의 `transform_features` 는 **반영되지 않는다** → 6D 저장 → 6D 소비로 맞출 것.
+- ⚠ `_wrt_start` 는 **앵커 의존이 아니다**(base=에피소드 시작). 따라서 relative pose 와 달리 **오프라인 bake 도 가능**하다 — 런타임인 유일한 이유는 노이즈 증강.
+- ⚠ raw 에 `demo_start_pose` 필드는 **없다**. 컨버터가 에피소드 프레임 0 에서 **파생**해야 한다(원본 UMI 도 SLAM 궤적에서 파생해 zarr 에 넣음).
+
+### 층 분리 (dev_plan §7.3/§9.5)
+| 층 | 위치 | 내용 |
+|---|---|---|
+| **표현 codec** | `schemas/canonical_ee10_se3.py` | `rot6d↔R`, `pose9d↔transform`, `invert`, `relative` — **컨버터·런타임 공용** (부록 D.5) |
+| **런타임 step** | `robot_maps/steps.py` | 앵커 의미 + relative/delta + Step 래퍼 |
+| **조립** | `processor_mypolicy.py` | pipeline 에 끼우기만 |
+
+> **lerobot_hong 의 실수**: codec 이 `se3.py`(numpy)와 `steps.py`(torch)에 **중복 구현**됐고 `relative_transform` 은 구현마저 다름(`np.linalg.inv` vs SE3 전치). dev_plan §8 이 *"구현 시 결정"* 으로 미룬 결과. → 우리는 **표현 옆에 codec 을 두어 구조적으로 차단**.
 
 ---
 
