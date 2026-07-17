@@ -13,8 +13,7 @@ current end-effector pose**, which makes it independent of any dataset's world f
 
 ## 1. Environment setup
 
-**Requirements**: Linux, conda, an NVIDIA GPU. The commands below target an RTX 5090 (Blackwell);
-for other GPUs only the torch index URL changes.
+**Requirements**: Linux, conda, an NVIDIA GPU.
 
 ### 1.1 Clone this repository
 
@@ -39,29 +38,40 @@ You can confirm this at any time with `git -C lerobot diff` — it should stay e
 ### 1.3 Create the conda environment
 
 ```bash
-conda create -n lerobot_hong2 python=3.10 -y
-conda activate lerobot_hong2
+conda create -n lerobot_project python=3.10 -y
+conda activate lerobot_project
 ```
 
 ### 1.4 Install torch
 
-lerobot requires `torch<2.11`, and Blackwell GPUs require `cu128+`. This satisfies both:
+Install torch yourself, before lerobot, so that pip does not pick a build that mismatches your GPU.
+lerobot v0.4.4 requires:
 
-```bash
-pip install "torch==2.10.*" "torchvision==0.25.*" --index-url https://download.pytorch.org/whl/cu128
+```
+torch >= 2.2.1, < 2.11.0
+torchvision >= 0.21.0, < 0.26.0
 ```
 
-Do not use a bare `pip install torch` — it will not respect the version cap or your CUDA version.
-For a different GPU, pick an `--index-url` matching your CUDA within the `torch<2.11` range.
+Pick the newest version in that range whose CUDA build your driver supports, and install it from the
+matching index. See [pytorch.org](https://pytorch.org/get-started/locally/) for the URL:
+
+```bash
+pip install "torch==<version>" "torchvision==<version>" --index-url https://download.pytorch.org/whl/<cuXXX>
+```
+
+A bare `pip install torch` respects neither the version cap nor your CUDA version. If
+`torch.cuda.is_available()` comes back `False` after installing, the CUDA build does not match your
+driver — pick a different one.
 
 ### 1.5 Install lerobot and the custom packages
 
-Install in dependency order. `--no-deps` prevents pip from replacing the torch build you just installed.
+Install in this order — each package depends on the ones above it, and `lerobot_canonical` is local,
+so pip must find it already installed rather than looking for it on PyPI.
 
 ```bash
 pip install -e lerobot
-pip install -e custom/utils/lerobot_canonical --no-deps
-pip install -e custom/policies/umidiffusion/lerobot_policy_umidiffusion --no-deps
+pip install -e custom/utils/lerobot_canonical
+pip install -e custom/policies/umidiffusion/lerobot_policy_umidiffusion
 ```
 
 All installs are editable, so code changes take effect without reinstalling. Reinstall only when a
@@ -137,7 +147,7 @@ and written as a `LeRobotDataset`. Only successful episodes are stored, and runs
 
 ```bash
 python custom/scripts/sim/collect_metaworld.py \
-    --output-root ~/datasets/metaworld_canonical/pick_place_v4 \
+    --output-root $HOME/datasets/metaworld_canonical/pick_place_v4 \
     --n-episodes 300
 ```
 
@@ -159,7 +169,7 @@ Inspect a dataset afterwards:
 
 ```bash
 python custom/scripts/data_processing/raw_inspect.py \
-    --raw-root ~/datasets/metaworld_canonical/pick_place_v4 \
+    --raw-root $HOME/datasets/metaworld_canonical/pick_place_v4 \
     --format lerobot_dataset --target-fps 80
 ```
 
@@ -173,7 +183,7 @@ lerobot-train \
     --policy.push_to_hub=false \
     --policy.use_depth=false \
     --dataset.repo_id=local/x \
-    --dataset.root=~/datasets/metaworld_canonical/pick_place_v4 \
+    --dataset.root=$HOME/datasets/metaworld_canonical/pick_place_v4 \
     --steps=30000 --batch_size=64 --policy.device=cuda --num_workers=8 \
     --save_freq=5000 --wandb.enable=false \
     --output_dir=outputs/train/umidiffusion_pick_place_v4

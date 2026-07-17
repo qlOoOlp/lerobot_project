@@ -11,7 +11,7 @@ requires-python = ">=3.10"
 # (lerobot_robot_/camera_/teleoperator_/policy_) 에 일부러 안 걸린다.
 #   keys.py                : lerobot.utils.constants 사용        -> lerobot
 #   schemas/canonical_ee10_se3.py : 배치 텐서 연산                -> torch
-dependencies = ["lerobot", "torch"]
+dependencies = ["lerobot"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
