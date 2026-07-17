@@ -1,4 +1,4 @@
-# lerobot_share
+# lerobot_project
 
 A custom robot-learning stack built on [HuggingFace `lerobot`](https://github.com/huggingface/lerobot).
 
