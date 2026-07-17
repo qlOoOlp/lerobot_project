@@ -153,8 +153,8 @@ def to_canonical_and_actions(
     Returns:
         (canonical, actions), both (N, sch.STATE_DIM) float32.
     """
-    canonical = state4_to_canonical10(states4, gripper_threshold)          # ① Step 2 함수 재사용
-    actions   = np.concatenate((canonical[1:], canonical[-1:]), axis=0)    # ② 한 칸 당기기
+    canonical = state4_to_canonical10(states4, gripper_threshold)          # Step 2 함수 재사용
+    actions   = np.concatenate((canonical[1:], canonical[-1:]), axis=0)    # 한 칸 당기기
     return canonical, actions
 
 def main() -> None:
@@ -172,7 +172,7 @@ def main() -> None:
     expert = wrapper.expert_policy
     task_text = wrapper.task_description
 
-    # ★ REQUIRED for --seed-base to do anything at all. Meta-World picks the object/goal
+    # Required for --seed-base to do anything at all. Meta-World picks the object/goal
     # placement in one of three ways (sawyer_xyz_env.py:697):
     #     _freeze_rand_vec=True  -> reuse last vec        (no randomization)
     #     seeded_rand_vec=True   -> self.np_random        (env.seed(n) controls it)  <- we want this

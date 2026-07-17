@@ -17,42 +17,42 @@
 """UmiDiffusion 모델 — Diffusion Policy as per "Diffusion Policy: Visuomotor Policy Learning
 via Action Diffusion" (paper: https://huggingface.co/papers/2303.04137).
 
-═══════════════════════════════════════════════════════════════════════════════
-■ 출처 (VENDORED — 손대기 전에 여기부터 읽을 것)
-    lerobot v0.4.4  src/lerobot/policies/diffusion/modeling_diffusion.py
-    를 **복사**한 뒤 개명·확장했다. 상속이 아니라 복사다.
+출처 (vendored, 손대기 전에 읽을 것)
 
-    원본과의 차이 (재동기화 시 이것만 다시 얹으면 된다):
-      1. import  configuration_diffusion.DiffusionConfig -> .configuration_umidiffusion.UmiDiffusionConfig
-      2. class DiffusionPolicy(PreTrainedPolicy) -> class UmiDiffusionPolicy(PreTrainedPolicy)
-      3. config_class / name = "umidiffusion"
-      4. __init__ 맨 앞에 config.apply_depth_gate() 추가
-      5. 파일 끝에 UmiDiffusion 별칭 + __all__
-    **내부 부품 클래스(DiffusionModel / DiffusionRgbEncoder / SpatialSoftmax /
-    DiffusionConditionalUnet1d / DiffusionConv1dBlock / DiffusionSinusoidalPosEmb 등)는
-    원본 이름 그대로 둔다** — 우리 모듈 안에만 사는 이름이라 충돌이 없고, 원본과의 diff 를
-    최소로 유지해야 "원본 대비 내가 뭘 바꿨나" 를 볼 수 있기 때문. 구조를 실제로 고칠 때 개명한다.
-    재동기화: `diff <lerobot>/src/lerobot/policies/diffusion/modeling_diffusion.py this`
+  lerobot v0.4.4 의 src/lerobot/policies/diffusion/modeling_diffusion.py 를 복사한 뒤
+  개명·확장했다. 상속이 아니라 복사다. 원본과의 차이는 다섯 가지뿐이라, 재동기화할 때는 최신
+  원본 위에 이것만 다시 얹으면 된다:
 
-■ ★ 왜 상속(DiffusionPolicy)이 아니라 복사인가
-    직접적 원인은 config 쪽이다 — configuration_umidiffusion.py 의 출처 블록 참고
-    (make_pre_post_processors 가 isinstance(cfg, DiffusionConfig) 로 분기해 우리 프로세서
-    팩토리를 조용히 가로챈다). 그건 config 상속만 끊어도 풀리므로, **정책까지 복사한 것은
-    별개의 결정**이다:
-      - 공식 규약(docs/source/bring_your_own_policies.mdx)이 "정책은 PreTrainedPolicy 를
-        상속하라"고 한다. 그러면 규약 100% 일치 + lerobot 결합 0
-        (공개 API 3개만 사용: PreTrainedPolicy, policies.utils, utils.constants).
-      - **앞으로 정책 구조 자체를 수정할 계획**이라 미리 owning 한다.
-        그 계획이 없다면 784줄 복사는 부채일 뿐이었다. 상세: refactoring.md 부록 D.7
+    1. import: configuration_diffusion.DiffusionConfig -> .configuration_umidiffusion.UmiDiffusionConfig
+    2. DiffusionPolicy(PreTrainedPolicy) -> UmiDiffusionPolicy(PreTrainedPolicy)
+    3. config_class / name = "umidiffusion"
+    4. __init__ 맨 앞에 config.apply_depth_gate() 추가
+    5. 파일 끝에 UmiDiffusion 별칭과 __all__
 
-■ 이 파일을 고칠 때
-    lerobot 원본과 diff 해서 "우리가 의도적으로 바꾼 것"만 나오는지 확인할 것.
-    UMI 확장 시 걸릴 자리로 예상되는 곳(미확인):
-      DiffusionRgbEncoder (RGB 만 상정) · _prepare_global_conditioning (관측 -> 조건 벡터)
+  diff <lerobot>/src/lerobot/policies/diffusion/modeling_diffusion.py this
+
+  내부 부품 클래스(DiffusionModel, DiffusionRgbEncoder, SpatialSoftmax,
+  DiffusionConditionalUnet1d, DiffusionConv1dBlock, DiffusionSinusoidalPosEmb 등)는 원본 이름을
+  그대로 둔다. 우리 모듈 안에만 사는 이름이라 충돌이 없고, 원본과의 diff 를 최소로 유지해야
+  "원본 대비 무엇을 바꿨나" 가 보이기 때문이다. 구조를 실제로 고칠 때 개명한다.
+
+왜 상속이 아니라 복사인가
+
+  직접적 원인은 config 쪽이다. make_pre_post_processors 가 isinstance(cfg, DiffusionConfig) 로
+  분기해 우리 프로세서 팩토리를 조용히 가로챈다 — configuration_umidiffusion.py 의 출처 블록에
+  자세히 있다. 그건 config 상속만 끊어도 풀리므로, 정책까지 복사한 것은 별개의 결정이다.
+
+  공식 규약(docs/source/bring_your_own_policies.mdx)이 정책은 PreTrainedPolicy 를 상속하라고
+  하고, 그러면 규약과 100% 일치하면서 lerobot 결합도 없다 — 공개 API 세 개(PreTrainedPolicy,
+  policies.utils, utils.constants)만 쓴다. 그리고 앞으로 정책 구조 자체를 수정할 계획이라 미리
+  owning 한다. 그 계획이 없었다면 784줄 복사는 부채일 뿐이었다. 상세는 refactoring.md 부록 D.7.
+
+이 파일을 고칠 때는 lerobot 원본과 diff 해서 의도적으로 바꾼 것만 나오는지 확인할 것. UMI 확장
+시 걸릴 자리로 예상되는 곳(미확인)은 DiffusionRgbEncoder(RGB 만 상정)와
+_prepare_global_conditioning(관측 -> 조건 벡터)이다.
 
 TODO(alexander-soare):
   - Remove reliance on diffusers for DDPMScheduler and LR scheduler.
-═══════════════════════════════════════════════════════════════════════════════
 """
 
 import math
@@ -101,21 +101,15 @@ class UmiDiffusionPolicy(PreTrainedPolicy):
             dataset_stats: Dataset statistics to be used for normalization. If not passed here, it is expected
                 that they will be passed with a call to `load_state_dict` before the policy is used.
 
-        ★ 원본과 다름: 맨 앞에서 config.apply_depth_gate() 를 호출한다.
+        원본과 다름: 맨 앞에서 config.apply_depth_gate() 를 호출한다. make_policy 는
+        input_features 를 채운 뒤(factory.py:517) validate_features 를 부르지 않고 바로 정책을
+        생성하므로, 이 시점은 input_features 가 이미 세팅됐고 모델은 아직 안 만들어진 유일한
+        지점이다. 여기서 depth 를 빼면 아래 DiffusionModel(config) 이 depth 인코더를 안 만든다.
 
-        ■ 왜 하필 여기인가
-          make_policy 가 input_features 를 채운 뒤(factory.py:517) validate_features 를
-          안 부르고 바로 정책을 생성한다. 즉 이 시점이:
-            - input_features 는 이미 세팅됨 ✓
-            - 모델은 아직 안 만들어짐 ✓  (아래 DiffusionModel(config) 이 인코더를 만든다)
-          => depth 를 빼면 depth 인코더를 **안 만든다**. lerobot 패치 불필요.
-
-        ■ 유의
-          - DiffusionModel(config) **뒤에** 부르면 이미 인코더가 만들어져서 소용없다.
-          - 바로 아래 validate_features() 보다도 먼저여야 게이트된 feature 로 검증된다.
-          - apply_depth_gate 는 idempotent 라 processor 쪽에서 또 불러도 안전.
-          - config 를 in-place 로 수정하므로, 체크포인트 저장 시 필터된 input_features 가
-            함께 저장된다 -> 로드 시 자동 일관.
+        순서가 전부다. DiffusionModel(config) 뒤에 부르면 이미 인코더가 만들어져 소용없고, 바로
+        아래 validate_features() 보다도 먼저여야 게이트된 feature 로 검증된다. apply_depth_gate 는
+        idempotent 라 processor 쪽에서 또 불러도 안전하다. config 를 in-place 로 고치므로 체크포인트
+        에는 필터된 input_features 가 저장되고, 로드 시에도 자동으로 일관된다.
         """
         config.apply_depth_gate()
         super().__init__(config)

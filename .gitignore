@@ -1,18 +1,15 @@
-# ── lerobot 본체 (별도 clone, 벤더링 안 함) ─────────────────────
-# README 의 setup 대로 `git clone ... && git checkout v0.4.4` 로 직접 받는다.
-# (완전 무수정 원칙이라 특정 커밋만 고정하면 재현됨)
-/lerobot/
+# 화이트리스트 방식: 루트의 모든 것을 무시하고 custom/ 과 README.md 만 되살린다.
+# 새 파일을 추적하려면 여기에 명시적으로 추가해야 한다.
+/*
+!/.gitignore
+!/README.md
+!/custom/
 
-# ── 실행 산출물 (로그·JSON·gif·체크포인트) ─────────────────────
-# 폴더 구조만 유지하고 내용물은 무시.
-/outputs/**
-!/outputs/
-!/outputs/.gitkeep
+# lerobot 본체는 별도 clone (벤더링 안 함). README 의 setup 대로
+# `git clone ... && git checkout v0.4.4` 로 직접 받는다 — 무수정 원칙이라 커밋만 고정하면 재현된다.
+# outputs/ (학습 산출물), tmp/ (검증 gif·png·npz) 도 위의 /* 에 걸려 이미 무시된다.
 
-# ── 검증 산출물 (gif/png/npz) ─────────────────────────────────
-/tmp/
-
-# ── Python ────────────────────────────────────────────────────
+# ── custom/ 안에서 무시할 것 ──────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
@@ -23,23 +20,9 @@ __pycache__/
 .ruff_cache/
 build/
 dist/
-
-# ── 가상환경 (혹시 repo 안에 만들 경우) ────────────────────────
-.venv/
-venv/
-env/
-
-# ── 실험 추적 / 대용량 아티팩트 ───────────────────────────────
-wandb/
+.ipynb_checkpoints/
 *.ckpt
 *.pt
 *.pth
-
-# ── 노트북 체크포인트 ─────────────────────────────────────────
-.ipynb_checkpoints/
-
-# ── 에디터 / OS ───────────────────────────────────────────────
-.vscode/
-.idea/
 .DS_Store
 *.swp

@@ -34,7 +34,7 @@ GRIPPER — everything WE own is binary {0, 1}, 0 = closed, 1 = open:
   Since obs[3] is a genuine state, it is directly observable at rollout — no
   command tracking or frame shift is needed anywhere.
 
-  ⚠ THE THRESHOLD IS TASK-DEPENDENT — never hardcode it at a call site.
+  The threshold is task-dependent — never hardcode it at a call site.
     obs[3] is continuous and pick-place measures [0.3955, 1.0]: the fingers stop on
     the block, so it never reaches 0. It is bimodal at ~1.0 (open) and ~0.40-0.46
     (gripping), so ~0.7 separates them. A THICKER object grips at a higher openness
@@ -104,7 +104,7 @@ FLIP_CAMERAS: frozenset[str] = frozenset({"corner2"})
 # 0.01003/0.00513/0.00261 m per step — exactly action * action_scale.
 # Task-independent (it is the env's constant), unlike the gripper threshold.
 #
-# ⚠ Do NOT fit this to the observed |dxyz| distribution. The hand lags the mocap
+# Do NOT fit this to the observed |dxyz| distribution. The hand lags the mocap
 # (weld + frame_skip=5), so it ramps up over ~10 steps and can transiently exceed
 # action_scale while catching up (pick-place measures mean 0.008, max 0.016). Those
 # are the *response*, not the gain: using them would make every command undershoot.
@@ -118,7 +118,7 @@ def render_frame(env: Any, image_size: int) -> np.ndarray:
     framing at collection and at rollout, or the policy sees a different world
     than it trained on — same contract as state4_to_canonical10().
 
-    ⚠ `env` MUST be the INNER env (`wrapper._env`), which corrects nothing. The lerobot
+    `env` must be the inner env (`wrapper._env`), which corrects nothing. The lerobot
     wrapper un-flips FLIP_CAMERAS in its own render() (metaworld.py:149) and
     _format_raw_obs() (:172); we bypass it because the expert needs the raw 39D obs. So
     both the un-flip and the resize are ours to do. Handing the WRAPPER here instead
@@ -174,12 +174,48 @@ def canonical10_to_env_action( # canonical 10D (abs) -> env 4D (rel)
     target10: np.ndarray,
     current_ee_xyz: np.ndarray,
     xyz_scale: float,
+    servo_gain: float = 1.0,
+    direction_preserving: bool = False,
 ) -> np.ndarray:
+    """canonical 절대 타겟 -> Meta-World 4D 액션.
+
+    env 액션은 위치가 아니라 mocap setpoint 의 속도 명령이다 (mocap += action * xyz_scale).
+    그래서 이 함수는 pose -> velocity 변환기이고, 정체는 resolved-rate P 제어기다.
+
+    servo_gain 은 그 P 게인이다. 물리 단위로 환산하면 (dt = 1/80s, xyz_scale = 0.01):
+        servo_gain=1.0 -> Kp = 1/dt = 80/s   "오차를 한 스텝에 0으로"
+        servo_gain=0.1 -> Kp = 8/s           metaworld scripted expert 와 같은 게인
+    기본 1.0 은 검증된 값이다 (30k ckpt, seeds 0~19, 18/20 = 90%).
+
+    게인을 낮출 때의 함정: 우리 기준(타겟)은 6.75mm/스텝으로 움직이므로 P 제어의 정상 상태
+    추종 오차가 v/Kp 로 남는다. gain=1.0 이면 6.75mm(= 정확히 한 스텝 뒤)지만 gain=0.1 이면
+    67.5mm 다. expert 는 고정 목표를 겨냥해 이 항이 없다 — 게인만 베껴오면 안 되는 이유다.
+    """
     target10 = np.asarray(target10, dtype=np.float32)
     if target10.shape != (sch.STATE_DIM,):
         raise ValueError(f"Expected shape ({sch.STATE_DIM},), got {target10.shape}.")
 
-    delta_xyz = (target10[:3] - np.asarray(current_ee_xyz, dtype=np.float32)) / float(xyz_scale)
+    delta_xyz = float(servo_gain) * (
+        target10[:3] - np.asarray(current_ee_xyz, dtype=np.float32)
+    ) / float(xyz_scale)
+
+    # 축별 클리핑은 어느 한 축이 1 을 넘는 순간 그 축만 눌러 이동 방향을 틀어놓는다. peak 로 나누면
+    # 축 사이 비율이 보존되어 방향이 유지된다. 액션 공간이 [-1,1]^3 인 것은 env 의 고정 사실이라
+    # 여기(어댑터)에 둔다.
+    #
+    # 기본값이 False 인 이유 (2026-07-17, 30k ckpt, pick-place 실측):
+    #   축별 클리핑은 스텝의 41% 에서 포화하며 그때 방향을 평균 7.4도(최대 23.5도) 틀어놓는다.
+    #   이걸 켜면 청크 중반(k=4)의 방향 변화가 30.3도 -> 18.4도로 줄어 원인은 확인된다. 그러나
+    #   정작 스텝 수를 결정하는 접근 굴곡도는 1.36 -> 1.30 밖에 안 움직이고(expert 는 1.04),
+    #   seed 1 이 성공 -> 200스텝 타임아웃으로 회귀했다. 포화가 클 때 부축 속도가 peak 배수만큼
+    #   느려지는 대가로 보인다 (실측 peak 최대 3.93 -> 부축 4배 감속).
+    #   즉 진단으로는 유효하지만 개선으로는 미검증이다. 20~30 에피소드 A/B 로 성공률이 확인되기
+    #   전까지 기본값은 검증된 축별 클리핑(90%, seeds 0~19)을 유지한다.
+    if direction_preserving:
+        peak = float(np.abs(delta_xyz).max())
+        if peak > 1.0:
+            delta_xyz = delta_xyz / peak
+
     openness = float(target10[sch.POSE_DIM])
     closing_effort = (0.5 - openness) * 2.0
     action = np.array([*delta_xyz, closing_effort], dtype=np.float32)

@@ -1,164 +1,313 @@
 # lerobot_share
 
-[HuggingFace `lerobot`](https://github.com/huggingface/lerobot) 위에 올린 커스텀 로봇 학습 스택.
-정책(policy) / 환경(env: metaworld·real) / 로봇(robot: franka) 을 **플러그인**으로 분리하고,
-**lerobot 본체는 완전 무수정(0-patch)** 으로 유지한다. metaworld 로 코어 루프(데이터→학습→eval)를
-먼저 완성하고 같은 canonical 스키마(10D `[xyz, rot6d, gripper]`)로 UMI 를 확장한다.
+A custom robot-learning stack built on [HuggingFace `lerobot`](https://github.com/huggingface/lerobot).
 
-> 설계·Phase 계획: [refactoring.md](refactoring.md) · embodiment↔canonical 번역 계약: [retargeting.md](retargeting.md) · 구현 동작 상세: [information.md](information.md)
+Policies, environments, and robots are separated as plugins, and **`lerobot` itself is never patched**.
+Everything is expressed in one canonical schema — a 10-D end-effector pose
+`[x, y, z, rot6d(6), gripper]` — so the same policy trains on Meta-World and, later, on UMI data.
 
-**진행 상황**: Phase 0(환경) ✅ · **Phase 1(데이터) ✅** (수집 코드 — canonical 10D, 이진 그리퍼, 80fps) ·
-**Phase 2(정책) ✅** — 2-0~2-7 (anchor-relative 런타임 프로세서 + depth 게이트, lerobot 무수정) ·
-**Phase 4(학습) ✅** — 실데이터 수렴 확인(600스텝 loss 0.958→0.032) + 체크포인트 왕복 검증 · 다음 = **Phase 5(eval)**
-> 데이터셋: `~/datasets/metaworld_canonical/pick_place_v4` (300ep / 16,420프레임). 시딩 함정
-> (`reset(seed=)` 무시)을 고친 뒤 재수집한 것이라 **같은 명령 = 같은 데이터셋**이 보장된다.
+The policy (`umidiffusion`) is a Diffusion Policy that consumes and predicts poses **relative to the
+current end-effector pose**, which makes it independent of any dataset's world frame.
 
-## 디렉토리 구조
+---
 
-`custom/` 의 최상위는 **`lerobot/` 본체의 최상위를 그대로 거울처럼 따른다**(`policies/` `envs/` `scripts/` `utils/`)
-— 읽는 사람이 새로 배울 구조가 없도록.
+## 1. Environment setup
 
-```
-lerobot_share/
-├── lerobot/                    # HF lerobot v0.4.4 — 별도 clone (git 무시, 벤더링 안 함)
-├── custom/                     # lerobot 플러그인/확장 코드
-│   ├── utils/lerobot_canonical/            ★ 배포판 — 공유 어휘 (lerobot/utils/ 대응)
-│   │   └── src/lerobot_canonical/
-│   │       ├── keys.py         #   데이터셋 키 (lerobot 상수에서 파생) ≈ utils/constants.py
-│   │       └── schemas/        #   표현별 모듈 하나씩 (재노출 없음)
-│   │           ├── canonical_ee10.py      #   EE-pose 10D [xyz, rot6d, gripper] — 치수·축
-│   │           └── canonical_ee10_se3.py  #   그 표현의 codec (rot6d↔R, pose9d↔T) ≈ utils/rotation.py
-│   ├── policies/umidiffusion/lerobot_policy_umidiffusion/   ★ 배포판 — 플러그인 (자동탐색)
-│   │   └── src/lerobot_policy_umidiffusion/
-│   │       ├── configuration_umidiffusion.py  #   UmiDiffusionConfig(PreTrainedConfig) @register_subclass
-│   │       ├── modeling_umidiffusion.py       #   UmiDiffusionPolicy(PreTrainedPolicy) — lerobot diffusion 벤더링
-│   │       ├── steps.py                       #   런타임 anchor-relative 변환 (순수 로직)
-│   │       └── processor_umidiffusion.py      #   pre/post 파이프라인 조립
-│   ├── envs/metaworld/canonical.py   # env 어댑터 — 수집·rollout 공유(train==inference)
-│   └── scripts/                # 실행 스크립트는 전부 여기
-│       ├── data_processing/raw_inspect.py     #   raw 데이터 인스펙터 (자기완결)
-│       └── sim/collect_metaworld.py           #   수집 (port_droid 패턴, Robot 없음)
-├── patches/                    # fallback 참고용 (기본은 무수정 → apply 하지 않음)
-├── outputs/                    # 실행 산출물 (로그·리포트) — git 무시
-├── tmp/real/                   # 검증 산출물 (gif 등) — git 무시
-├── refactoring.md              # 계획·Phase 순서·아키텍처
-├── retargeting.md              # embodiment ↔ canonical 번역 계약
-└── information.md              # 구현 동작 상세
-```
+**Requirements**: Linux, conda, an NVIDIA GPU. The commands below target an RTX 5090 (Blackwell);
+for other GPUs only the torch index URL changes.
 
-**패키지 2개의 역할이 다르다**:
-- `lerobot_canonical` = **라이브러리**. 정책·env·스크립트가 서로를 모른 채 합의하는 어휘. lerobot 의 자동탐색
-  접두사에 **일부러 안 걸리게** 지었다(플러그인이 아니므로).
-- `lerobot_policy_umidiffusion` = **플러그인**. `lerobot_policy_` 접두사 덕에 `register_third_party_plugins()`
-  가 설치된 배포판을 훑어 **자동 import** → `--policy.type=umidiffusion` 이 lerobot 패치 없이 뜬다.
+### 1.1 Clone this repository
 
-## 사전 준비
-
-- Linux + conda (miniconda/anaconda)
-- NVIDIA GPU + 드라이버(CUDA). 아래 명령은 **RTX 5090(Blackwell)** 기준 — 다른 GPU 는 torch 인덱스만 조정.
-
-## 환경 세팅
-
-### 1) 이 저장소 clone
 ```bash
 git clone <this-repo-url> lerobot_share
 cd lerobot_share
 ```
 
-### 2) lerobot 본체 clone + 버전 고정 (v0.4.4)
-lerobot 은 이 repo 에 **포함하지 않는다**(.gitignore). 아래로 직접 받는다.
+### 1.2 Clone lerobot and pin it to v0.4.4
+
+`lerobot` is not vendored here (it is git-ignored). Fetch it yourself:
+
 ```bash
 git clone https://github.com/huggingface/lerobot.git
 git -C lerobot checkout v0.4.4          # commit 8fff0fde
 ```
-> **무수정 원칙**: lerobot 소스는 건드리지 않는다. 커스텀 정책/프로세서는 플러그인 규칙
-> (`lerobot_policy_<name>` 접두사, `register_subclass` 폴백)으로 연결되므로 패치가 필요 없다.
-> `patches/` 는 참고용이며 apply 하지 않는다.
 
-### 3) conda 환경 생성
+The pin matters: this project is verified against v0.4.4 and never modifies it.
+Custom code attaches through lerobot's plugin conventions, so no patch is required.
+You can confirm this at any time with `git -C lerobot diff` — it should stay empty.
+
+### 1.3 Create the conda environment
+
 ```bash
 conda create -n lerobot_hong2 python=3.10 -y
 conda activate lerobot_hong2
 ```
 
-### 4) torch 설치 (GPU/CUDA 에 맞춰)
-lerobot 은 `torch<2.11` 을 요구하고, RTX 5090(Blackwell)은 `cu128+` 이 필요하다 → 둘 다 만족:
+### 1.4 Install torch
+
+lerobot requires `torch<2.11`, and Blackwell GPUs require `cu128+`. This satisfies both:
+
 ```bash
 pip install "torch==2.10.*" "torchvision==0.25.*" --index-url https://download.pytorch.org/whl/cu128
 ```
-> 다른 GPU: `torch<2.11` 범위에서 자신의 CUDA 에 맞는 `--index-url` 을 선택.
-> **bare `pip install torch` 금지** (버전 캡·CUDA 를 못 맞춤).
 
-### 5) lerobot editable 설치
+Do not use a bare `pip install torch` — it will not respect the version cap or your CUDA version.
+For a different GPU, pick an `--index-url` matching your CUDA within the `torch<2.11` range.
+
+### 1.5 Install lerobot and the custom packages
+
+Install in dependency order. `--no-deps` prevents pip from replacing the torch build you just installed.
+
 ```bash
 pip install -e lerobot
-```
-
-### 6) 커스텀 패키지 editable 설치
-**의존 순서대로** (라이브러리 → 플러그인). `--no-deps` 는 이미 깐 torch 를 PyPI 판으로 덮어쓰지 않기 위함:
-```bash
 pip install -e custom/utils/lerobot_canonical --no-deps
 pip install -e custom/policies/umidiffusion/lerobot_policy_umidiffusion --no-deps
 ```
-> **editable 이라 코드 수정은 재설치 불필요.** 단 `pyproject.toml` 변경이나 **디렉토리 이동** 시에는
-> 재설치해야 한다 — editable 은 설치 시점의 **절대경로**를 박아두므로 옮기면 옛 경로를 계속 가리킨다.
 
-### 7) 검증
+All installs are editable, so code changes take effect without reinstalling. Reinstall only when a
+`pyproject.toml` changes or a package directory moves — editable installs record absolute paths.
+
+### 1.6 Install the Meta-World simulator
+
 ```bash
-python -c "import torch; print(torch.__version__, torch.cuda.is_available())"   # 2.10.x+cu128  True
+pip install metaworld==3.0.0
+```
+
+### 1.7 Verify
+
+```bash
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"   # 2.10.x+cu128 True
 python -c "import lerobot; print(lerobot.__version__)"                          # 0.4.4
-# 플러그인 자동탐색 — repo 밖(예: cd /tmp)에서 실행해도 떠야 정상
-lerobot-train --help | grep -A2 "policy.type"                                   # umidiffusion 이 보임
+
+# Plugin discovery — run this from outside the repo (e.g. cd /tmp) and the policy must still appear.
+lerobot-train --help | grep -A2 "policy.type"                                   # lists "umidiffusion"
 ```
 
-## 커스텀 코드 실행
+---
 
-- **어느 디렉토리에서 실행해도 된다.** 두 패키지가 설치된 배포판이라 `cd` 위치와 무관하게 import 된다
-  (스크립트는 필요 시 스스로 `PROJECT_ROOT` 를 `sys.path` 에 넣는다).
-- 정책은 **이름만 대면 뜬다** — `lerobot_policy_` 접두사를 `register_third_party_plugins()` 가 자동 탐색:
-  ```bash
-  lerobot-train --policy.type=umidiffusion --policy.push_to_hub=false \
-      --dataset.repo_id=local/x --dataset.root=~/datasets/metaworld_canonical/pick_place_v3_bin
-  ```
-  > `--policy.push_to_hub=false` 는 **필수**다 (`configs/train.py:138` — hub 업로드가 기본값).
-- 추가 의존성은 Phase 별로 설치: `metaworld==3.0.0`(env), `scipy`(processor), `h5py`(UMI raw) 등 — refactoring.md 부록 B.
+## 2. Project structure
 
-예) raw 데이터 인스펙터 / metaworld 수집:
+`custom/` mirrors the top level of `lerobot/` itself (`policies/`, `envs/`, `scripts/`, `utils/`),
+so there is no new layout to learn.
+
+```
+lerobot_share/
+├── lerobot/                        HF lerobot v0.4.4 — cloned separately, git-ignored
+├── custom/
+│   ├── utils/lerobot_canonical/                  Installable library: the shared vocabulary
+│   │   └── src/lerobot_canonical/
+│   │       ├── keys.py                           Dataset keys, derived from lerobot constants
+│   │       └── schemas/
+│   │           ├── canonical_ee10.py             The 10-D EE-pose representation: dims and axes
+│   │           └── canonical_ee10_se3.py         Its codec: rot6d <-> R, pose9d <-> transform
+│   ├── policies/umidiffusion/lerobot_policy_umidiffusion/    Installable plugin: the policy
+│   │   └── src/lerobot_policy_umidiffusion/
+│   │       ├── configuration_umidiffusion.py     UmiDiffusionConfig(PreTrainedConfig)
+│   │       ├── modeling_umidiffusion.py          UmiDiffusionPolicy(PreTrainedPolicy)
+│   │       ├── steps.py                          Runtime anchor-relative transforms
+│   │       ├── processor_umidiffusion.py         Pre/post pipeline assembly
+│   │       └── runtime_buffer.py                 Observation history for inference
+│   ├── envs/metaworld/canonical.py               Meta-World adapter, shared by collection and rollout
+│   └── scripts/
+│       ├── data_processing/raw_inspect.py        Raw-data inspector
+│       └── sim/
+│           ├── collect_metaworld.py              Data collection
+│           └── rollout_metaworld.py              Inference / evaluation
+├── outputs/                        Run artifacts — git-ignored
+└── tmp/real/                       Verification artifacts (gifs, images) — git-ignored
+```
+
+The two installable packages play different roles:
+
+- **`lerobot_canonical`** is a library. Policies, environments, and scripts agree on it without
+  knowing about each other. Its name deliberately avoids lerobot's auto-discovery prefixes, because
+  it is not a plugin.
+- **`lerobot_policy_umidiffusion`** is a plugin. The `lerobot_policy_` prefix lets lerobot import it
+  automatically, which is why `--policy.type=umidiffusion` works without patching lerobot.
+
+`custom/envs/metaworld/canonical.py` stays a plain module: only scripts import it, and lerobot
+already ships a Meta-World environment.
+
+---
+
+## 3. Collecting Meta-World data
+
+Meta-World's scripted expert drives the environment; each frame is converted to the canonical schema
+and written as a `LeRobotDataset`.
+
 ```bash
-python custom/scripts/data_processing/raw_inspect.py --raw-root <dataset> --format lerobot_dataset
-python custom/scripts/sim/collect_metaworld.py \
-    --output-root ~/datasets/metaworld_canonical/pick_place_v3_bin --n-episodes 300
+MUJOCO_GL=egl python custom/scripts/sim/collect_metaworld.py \
+    --output-root ~/datasets/metaworld_canonical/pick_place_v4 \
+    --n-episodes 300
 ```
 
-## 트러블슈팅
+`MUJOCO_GL=egl` selects headless rendering. Only successful expert episodes are stored, and runs are
+reproducible — the same command produces the same dataset.
 
-- **`--policy.type=umidiffusion` 이 `invalid choice` 로 죽을 때** — ★ 진짜 원인은 화면에 안 나온다.
-  `register_third_party_plugins()`(`lerobot/utils/import_utils.py:152`)가 플러그인 import 실패를
-  **`except Exception: logging.exception` 으로 삼킨다.** 그래서 "정책이 없다"고만 보이고, 실제로는
-  플러그인 안에서 `ModuleNotFoundError` 가 났을 뿐이다. 원인을 보려면 **직접 import** 해본다:
-  ```bash
-  cd /tmp && python -c "import lerobot_policy_umidiffusion"   # 여기서 진짜 예외가 뜬다
-  ```
-  가장 흔한 원인: **설치된 배포판이 설치 안 된 경로를 import** (`No module named 'custom'`).
-  설치된 패키지가 import 하는 것은 **전부 설치된 배포판이어야 한다** — 이것이 `lerobot_canonical` 을
-  별도 배포판으로 뺀 이유다(refactoring.md 부록 D.6).
-- **디렉토리를 옮긴 뒤 옛 경로를 계속 가리킬 때**: editable 설치는 절대경로를 박아둔다 → 해당 패키지 재설치.
-- **import 가 엉뚱하게 shadow 될 때**: `~/.local`(user-site) 오염 가능. `PYTHONNOUSERSITE=1` 로 무시하거나 user-site 를 정리.
-- **CUDA 불일치**: `torch.cuda.is_available()` 가 False 면 `--index-url` 의 CUDA 를 드라이버에 맞춘다.
+### 3.1 Options
 
-## 라이선스 / 출처
+Defaults are the verified configuration; the command above overrides only the output path and episode
+count.
 
-lerobot 은 별도 clone 이며 Apache-2.0 (HuggingFace). 이 repo 는 그 위의 커스텀 확장 코드를 포함한다.
+| Option | Default | Notes |
+|---|---|---|
+| `--output-root` | required | Where the dataset is written. |
+| `--n-episodes N` | 300 | Successful episodes to collect. Failed expert attempts are retried, not stored. |
+| `--overwrite` | off | Replace an existing output directory instead of aborting. |
+| `--env-task` | `pick-place-v3` | Meta-World task id. |
+| `--repo-id` | `local/metaworld_canonical_pick_place` | Dataset id recorded in the dataset. |
+| `--max-steps N` | 200 | Episode cap. Match this at rollout. |
 
-**벤더링 고지** — 아래 2개 파일은 lerobot **v0.4.4 의 diffusion 정책을 복사**한 것이다 (Apache-2.0,
-원 저작권: Columbia Artificial Intelligence, Robotics Lab & The HuggingFace Inc. team — 라이선스 헤더 보존):
+### 3.2 Options that end up baked into the dataset
 
-| 우리 파일 | 원본 (lerobot v0.4.4) |
-|---|---|
-| `custom/policies/umidiffusion/.../configuration_umidiffusion.py` | `src/lerobot/policies/diffusion/configuration_diffusion.py` |
-| `custom/policies/umidiffusion/.../modeling_umidiffusion.py` | `src/lerobot/policies/diffusion/modeling_diffusion.py` |
+Changing any of these means re-collecting, and rollout must be given the same values or the policy
+acts on a world it was not trained on — silently, with no error.
 
-각 파일 상단의 **출처 블록**에 원본 경로·버전·원본과의 차이·재동기화 방법이 적혀 있다.
-**상속이 아니라 복사인 이유**는 refactoring.md **부록 D.7** (요약: lerobot 의 `make_pre_post_processors` 가
-`isinstance(cfg, DiffusionConfig)` 로 분기해 커스텀 프로세서를 조용히 가로챈다. 공식 규약은
-`PreTrainedConfig`/`PreTrainedPolicy` 상속이며, 공식 예제 `lerobot_policy_ditflow` 도 그렇게 한다).
+| Option | Default | Notes |
+|---|---|---|
+| `--image-size N` | 240 | Image resolution. Training reads it from the dataset. |
+| `--gripper-threshold F` | 0.7 | `obs[3] >= F` counts as open. Task-dependent — measure it per task. |
+| `--fps N` | 80 | Label only; must match Meta-World's actual rate (`frame_skip 5 x 0.0025s`). |
+
+### 3.3 Seeding and noise
+
+| Option | Default | Notes |
+|---|---|---|
+| `--seed-base N` | 100 | First reset seed. Keep at 100 or above so evaluation seeds stay held out. |
+| `--noise-fraction F` | 0.3 | Fraction of episodes with Gaussian noise added to the expert's action. |
+| `--noise-std F` | 0.15 | Noise magnitude, in action units. |
+
+The noise injection is deliberate. It produces "drifted, then recovered" states that clean
+demonstrations never contain, which is what the policy needs in order to recover at rollout.
+
+The seed base matters more than it looks. Meta-World ignores `reset(seed=)` by design and picks
+object placement from the global RNG unless `seeded_rand_vec` is set, which the collection script
+does. Without it, `--seed-base` would do nothing and the evaluation seeds would not be held out.
+
+Inspect a dataset afterwards:
+
+```bash
+python custom/scripts/data_processing/raw_inspect.py \
+    --raw-root ~/datasets/metaworld_canonical/pick_place_v4 \
+    --format lerobot_dataset --target-fps 80
+```
+
+---
+
+## 4. Training
+
+```bash
+lerobot-train \
+    --policy.type=umidiffusion \
+    --policy.push_to_hub=false \
+    --policy.use_depth=false \
+    --dataset.repo_id=local/x \
+    --dataset.root=~/datasets/metaworld_canonical/pick_place_v4 \
+    --steps=30000 --batch_size=64 --policy.device=cuda --num_workers=8 \
+    --save_freq=5000 --wandb.enable=false \
+    --output_dir=outputs/train/umidiffusion_pick_place_v4
+```
+
+`--policy.push_to_hub=false` is required; the default is `true`, which demands a `policy.repo_id`
+and otherwise aborts. `--policy.use_depth=false` matches the Meta-World dataset, which has no depth.
+
+Loss should fall quickly — roughly 0.96 to 0.03 within the first epoch.
+
+To continue an interrupted or finished run, resume from a checkpoint. Passing a new `--steps`
+rebuilds the learning-rate schedule for the new total:
+
+```bash
+python -u -m lerobot.scripts.lerobot_train \
+    --config_path=outputs/train/umidiffusion_pick_place_v4/checkpoints/010000/pretrained_model/train_config.json \
+    --resume=true --steps=30000
+```
+
+---
+
+## 5. Inference
+
+Roll the trained policy out in Meta-World and measure its success rate.
+
+```bash
+MUJOCO_GL=egl python custom/scripts/sim/rollout_metaworld.py \
+    --checkpoint outputs/train/umidiffusion_pick_place_v4/checkpoints/030000/pretrained_model \
+    --n-episodes 20
+```
+
+`MUJOCO_GL=egl` selects headless rendering; without it the script looks for a display and fails.
+No window opens — results are printed and written to gifs.
+
+### 5.1 What to run
+
+| Option | Default | Notes |
+|---|---|---|
+| `--checkpoint` | required | Path to a `pretrained_model` directory. Use `/dev/null` with `--expert`. |
+| `--n-episodes N` | 20 | Episodes to run, using seeds `--seed` through `--seed + N - 1`. |
+| `--seed N` | 0 | First evaluation seed. Collection starts at 100, so 0–99 are held out. |
+| `--expert` | off | Run the scripted expert instead of the policy. See 5.3. |
+
+Use 20–30 episodes for any comparison. Ten episodes carry roughly ±15 percentage points of noise,
+which is wider than most differences worth measuring.
+
+### 5.2 Saving gifs
+
+The command above already writes one gif, because `--gif-episodes` defaults to 1.
+
+| Option | Default | Notes |
+|---|---|---|
+| `--gif-episodes N` | 1 | Save the first N episodes. `0` disables saving. |
+| `--gif-dir PATH` | `tmp/real` | Where to write them. |
+
+Filenames are `rollout_<task>_<policy\|expert>_ep<N>.gif` and do not encode any settings, so a second
+run overwrites the first. When comparing configurations, give each run its own `--gif-dir`.
+
+Gif encoding costs more than the rollout itself — roughly 30 s per episode against a few seconds of
+simulation. Pass `--gif-episodes 0` when you only need the success rate.
+
+### 5.3 The expert control group
+
+The scripted expert drives the same environment through the same loop, so it isolates the policy from
+everything else. It should succeed on every episode; if it does not, the problem is the environment
+or the rollout loop rather than the policy.
+
+```bash
+MUJOCO_GL=egl python custom/scripts/sim/rollout_metaworld.py \
+    --checkpoint /dev/null --expert --n-episodes 10
+```
+
+Note that the expert bypasses the canonical-to-action conversion and issues environment actions
+directly. It therefore validates the environment, not the action mapping.
+
+### 5.4 Options that must match collection
+
+These are baked into the dataset. A mismatch breaks the train/inference contract silently — no error,
+just a policy acting on a world it was not trained on.
+
+| Option | Default | Notes |
+|---|---|---|
+| `--env-task` | `pick-place-v3` | Must match the collected task. |
+| `--image-size N` | 240 | Must match the dataset resolution. |
+| `--gripper-threshold F` | 0.7 | Task-dependent, and baked into the dataset at collection. |
+| `--max-steps N` | 200 | Match collection so episode lengths are comparable. |
+
+### 5.5 Controller options
+
+These convert the policy's canonical pose targets into Meta-World's 4-D action. They affect inference
+only; the policy is untouched. Defaults are the verified configuration (90% on seeds 0–19 at 30k).
+
+| Option | Default | Notes |
+|---|---|---|
+| `--xyz-scale F` | 0.01 | The environment's `action_scale`. A constant, not something to fit to data. |
+| `--servo-gain F` | 1.0 | Resolved-rate P gain. 1.0 means Kp = 1/dt: null the error in one step. |
+| `--consume-steps N` | 0 | Actions executed per inference. 0 uses the policy's `n_action_steps` (8). |
+| `--lookahead N` | 0 | Aim N chunk entries ahead instead of at the next one. |
+| `--torch-seed N` | 42 | Diffusion sampling is stochastic; fix this for reproducible runs. |
+
+Lowering `--consume-steps` re-plans more often, which sounds safer but is not: the gripper needs
+several consecutive closing commands to actually grasp, and truncating the chunk drops them. Measured
+at 30k: 8 gives 90%, 4 gives 5%.
+
+`--lookahead` reduces path wander but removes the controller's ability to decelerate, because the aim
+point stays a fixed distance ahead however close the target is. Measured at 30k over 20 episodes:
+0 and 1 give 90%, 2 gives 60%, 4 gives 55%.
+

@@ -41,7 +41,7 @@ ANCHOR = "rgb"  # stream used as the episode's clock/reference
 POSE_JUMP_DEFAULTS = {"pos": 0.05, "ratio": 20.0, "rot": 10.0}
 
 
-# ─────────────────────────────── data model ─────────────────────────────── #
+# --- data model ---
 @dataclass
 class Stream:
     name: str
@@ -60,7 +60,7 @@ class Episode:
     streams: list[Stream] = field(default_factory=list)
 
 
-# ─────────────────────────── loader: record3d h5 ────────────────────────── #
+# --- loader: record3d h5 ---
 _EP_RE = re.compile(r"episode_(\d+)")
 _DEFAULT_DEPTH_SHAPE = (256, 192)
 
@@ -135,7 +135,7 @@ def load_record3d_h5(path: str | Path, use_depth: bool = True,
     return Episode(path.stem, streams)
 
 
-# ───────────────────── adapter: existing LeRobotDataset ─────────────────── #
+# --- adapter: existing LeRobotDataset ---
 def iter_record3d_h5(root, use_depth=True, pose_source="pose_relative", max_episodes=None, **_):
     for p in find_episodes(root)[:max_episodes]:
         yield load_record3d_h5(p, use_depth=use_depth, pose_source=pose_source)
@@ -189,7 +189,7 @@ ITERATORS: dict[str, Callable[..., object]] = {
 }
 
 
-# ───────────────────────────────── analysis ─────────────────────────────── #
+# --- analysis ---
 def _ts_stats(ts: np.ndarray | None) -> dict | None:
     if ts is None:
         return None
@@ -386,7 +386,7 @@ def analyze_dataset(eps: list[dict], target_fps: float | None = None, tol: float
             "issues": issues, "warnings": warnings}
 
 
-# ───────────────────────────────── report ───────────────────────────────── #
+# --- report ---
 def _fmt_time(t: dict | None) -> str:
     if not t or t.get("fps") is None:
         return f"n={t['count'] if t else 0} (fps n/a)"
@@ -441,12 +441,12 @@ def print_dataset(ds: dict, target_fps: float | None) -> None:
     print(f"episodes     : {ds['n_episodes']}")
     print(f"total frames : {ds['total_frames']} (anchor stream)")
     if ds["fps_distribution"]:
-        print("fps distrib. : " + "  ".join(f"{f}fps×{c}" for f, c in ds["fps_distribution"].items()))
+        print("fps distrib. : " + "  ".join(f"{f}fps x{c}" for f, c in ds["fps_distribution"].items()))
         if len(ds["fps_distribution"]) > 1:
-            print(f"               ⚠ MIXED rate ({len(ds['fps_distribution'])} distinct fps)")
+            print(f"               [warn] MIXED rate ({len(ds['fps_distribution'])} distinct fps)")
     if target_fps is not None:
         n_out = len(ds["outliers"])
-        print(f"target fps   : {target_fps}  →  {'OK ✓' if not n_out else f'{n_out} OUTLIERS ⚠'}")
+        print(f"target fps   : {target_fps}  ->  {'OK' if not n_out else f'[warn] {n_out} OUTLIERS'}")
         for o in ds["outliers"][:12]:
             print(f"                 - {o['episode']}: {o['fps']}fps")
         if n_out > 12:
@@ -454,7 +454,7 @@ def print_dataset(ds: dict, target_fps: float | None) -> None:
     jumpy = ds.get("jumpy_episodes", [])
     if jumpy:
         thr = ds["jump_thresholds"]
-        print(f"pose JUMP     : {len(jumpy)} episode(s) ⚠  "
+        print(f"pose JUMP     : [warn] {len(jumpy)} episode(s)  "
               f"[>{thr['pos']}m OR >{thr['ratio']:.0f}x OR >{thr['rot']}deg]")
         for j in jumpy[:12]:
             print(f"                 - {j['episode']}: {', '.join(j['reasons'])}")
@@ -464,14 +464,14 @@ def print_dataset(ds: dict, target_fps: float | None) -> None:
     for name, dc in ds["dim_consistency"].items():
         if dc["consistent"]:
             v = dc["variants"][0]
-            print(f"   {name:<18} ✓ {'x'.join(map(str, v['shape'])) or 'scalar'} {v['dtype']}")
+            print(f"   {name:<18} OK {'x'.join(map(str, v['shape'])) or 'scalar'} {v['dtype']}")
         else:
-            print(f"   {name:<18} ⚠ INCONSISTENT: " +
+            print(f"   {name:<18} [warn] INCONSISTENT: " +
                   " | ".join(f"{'x'.join(map(str, v['shape']))} {v['dtype']}({v['n']})" for v in dc["variants"]))
     print("-" * 72)
-    print("WARNINGS:" if ds["warnings"] else "no warnings ✓")
+    print("WARNINGS:" if ds["warnings"] else "no warnings")
     for w in ds["warnings"]:
-        print(f"   ⚠ {w}")
+        print(f"   - {w}")
     print(bar)
 
 
@@ -496,7 +496,7 @@ def print_issues(ds: dict) -> None:
     print("=" * 72)
 
 
-# ─────────────────────────────────── cli ────────────────────────────────── #
+# --- cli ---
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Inspect raw episodes before dataset conversion.")
     ap.add_argument("--raw-root", required=True, help="record3d: episode_*.h5 dir | lerobot_dataset: repo_id or dataset root")

@@ -1,37 +1,26 @@
 """추론용 관측 히스토리 버퍼 — 정책이 요구하는 (B, T, ...) 윈도우를 만든다.
 
-═══════════════════════════════════════════════════════════════════════════════
-■ ★ 왜 이게 필요한가 — 정책의 _queues 를 못 쓰기 때문
-    학습은 DataLoader 가 delta_timestamps 로 윈도우를 잘라 (B, T, 10) 을 준다.
-    추론은? 정책에도 큐가 있지만(`_queues`), 그 stack 은 **predict_action_chunk 안**에서
-    일어난다 = **프로세서보다 뒤**다:
+학습은 DataLoader 가 delta_timestamps 로 윈도우를 잘라 (B, T, 10) 을 준다. 추론에는 그게 없다.
+정책에도 큐(_queues)가 있지만 stack 이 predict_action_chunk 안, 즉 프로세서보다 뒤에서 일어난다:
 
-        select_action(obs)            # obs = (B, 10)  ← 프로세서는 이미 지나감
-          └ populate_queues(...)
-          └ predict_action_chunk()
-              └ torch.stack(queues)   # ← 여기서 (B, T, 10) 이 됨. 너무 늦다
+    select_action(obs)              # obs = (B, 10). 프로세서는 이미 지나갔다.
+      -> populate_queues(...)
+      -> predict_action_chunk()
+           -> torch.stack(queues)   # 여기서 (B, T, 10) 이 된다. 너무 늦다.
 
-    우리 CanonicalPoseToRelativeObservationStep 은 앵커 = state[:, -1] 이 필요해
-    **(B, T, 10) 을 프로세서 단계에서** 받아야 한다. select_action 을 쓰면 (B, 10) 이 와서
-    `ndim != 3` ValueError 로 죽는다.
+CanonicalPoseToRelativeObservationStep 은 앵커로 state[:, -1] 이 필요해 (B, T, 10) 을 프로세서
+단계에서 받아야 한다. select_action 을 쓰면 (B, 10) 이 와서 ndim != 3 ValueError 로 죽는다.
+그래서 rollout 이 자체 히스토리로 윈도우를 만들어 preprocessor 에 넘기고, select_action 대신
+policy.diffusion.generate_actions() 를 직접 부른다.
 
-    => rollout 이 **자체 히스토리**로 윈도우를 만들어 preprocessor 에 넘기고,
-       select_action 대신 **policy.diffusion.generate_actions()** 를 직접 부른다.
-       (refactoring.md 2-3 절 / Phase 5 절에 계약으로 기록됨)
+이 파일이 정책 패키지 안에 있는 이유는 embodiment 를 모르기 때문이다. metaworld 든 UMI 든
+franka 든 canonical 10D 관측을 T개 모아 정책 입력을 만드는 일은 같다. 아는 것은 정책의 계약
+(n_obs_steps, canonical 키, STATE_DIM)뿐이라 정책과 운명을 같이한다.
 
-■ 왜 정책 패키지 안인가
-    embodiment 를 모른다 — metaworld 든 UMI 든 franka 든 "canonical 10D 관측을 T개 모아
-    정책 입력을 만든다" 는 같은 일이다. 아는 것은 **정책의 계약**(n_obs_steps, canonical 키,
-    STATE_DIM)뿐이라 정책과 운명을 같이한다.
-    Phase 5(metaworld rollout) · Phase 7(UMI 오프라인 추론) · Phase 9-11(실기)가 공유한다.
-
-■ 동기 / 비동기
-    지금은 **동기 전용**이다. sim 은 우리가 env.step() 을 부를 때만 시간이 흐르므로
-    정책이 얼마나 오래 생각하든 세상은 멈춰 있다 → 지연 개념이 없다.
-    실기(Phase 9-11)는 다르다 — 원본 UMI 는 robot_action_latency=0.1s 를 명시적으로
-    모델링한다(eval_robots_config.yaml). 그때 이 버퍼 위에 **타임스탬프 기반 정렬 +
-    멀티스레딩**을 얹는다. TIMESTAMP_KEY 를 지금부터 들고 다니는 게 그 대비다.
-═══════════════════════════════════════════════════════════════════════════════
+지금은 동기 전용이다. sim 은 우리가 env.step() 을 부를 때만 시간이 흐르므로 정책이 얼마나 오래
+생각하든 세상은 멈춰 있고 지연이라는 개념이 없다. 실기는 다르다 — 원본 UMI 는
+robot_action_latency=0.1s 를 명시적으로 모델링한다(eval_robots_config.yaml). 그때 이 버퍼 위에
+타임스탬프 기반 정렬과 멀티스레딩을 얹는다. TIMESTAMP_KEY 를 지금부터 들고 다니는 게 그 대비다.
 """
 
 from __future__ import annotations
@@ -53,17 +42,13 @@ TIMESTAMP_KEY = "timestamp"
 class ObservationHistoryBuffer:
     """canonical 관측을 n_obs_steps 개 들고 있다가 (T, ...) 윈도우로 내준다.
 
-    ■ 워밍업 규약 — 첫 프레임 복제
-      에피소드 시작 직후엔 히스토리가 1개뿐이다. 그때 **가장 오래된 프레임을 복제**해
-      T개를 채운다. lerobot 의 정책 큐도 같은 규약이고(select_action docstring:
-      "for the first steps, the observation is copied n_obs_steps times"), 학습 데이터의
-      첫 프레임 패딩과도 맞는다.
-      => 이러면 앵커(마지막 프레임)는 항상 '진짜 지금' 이고, 복제되는 건 과거뿐이다.
+    에피소드 시작 직후엔 히스토리가 1개뿐이다. 그때 가장 오래된 프레임을 복제해 T개를 채운다.
+    lerobot 의 정책 큐도 같은 규약이고("for the first steps, the observation is copied
+    n_obs_steps times"), 학습 데이터의 첫 프레임 패딩과도 맞는다. 복제되는 건 과거뿐이라
+    앵커(마지막 프레임)는 항상 진짜 지금이다.
 
-    ■ 왜 값을 copy() 하나
-      env 가 관측 배열을 재사용하는 경우가 있다(in-place 갱신). 복사하지 않으면
-      **히스토리 전체가 최신 값으로 덮여** 앵커-relative 가 전부 0이 된다.
-      조용히 틀리는 종류라 방어한다.
+    append 에서 값을 copy() 하는 이유는 env 가 관측 배열을 in-place 로 재사용하는 경우가 있기
+    때문이다. 복사하지 않으면 히스토리 전체가 최신 값으로 덮여 앵커-relative 가 전부 0이 된다.
     """
 
     def __init__(self, n_obs_steps: int, include_depth: bool = False) -> None:
@@ -110,7 +95,7 @@ class ObservationHistoryBuffer:
         if state.shape != (sch.STATE_DIM,):
             raise ValueError(f"`{OBS_STATE}` must be ({sch.STATE_DIM},), got {state.shape}.")
 
-        self._rgb.append(rgb.copy())      # copy: env 가 배열을 재사용할 수 있다 (클래스 docstring)
+        self._rgb.append(rgb.copy())      # copy: env 가 배열을 재사용할 수 있다
         self._state.append(state.copy())
         self._timestamp.append(float(observation.get(TIMESTAMP_KEY, 0.0)))
 
@@ -123,7 +108,7 @@ class ObservationHistoryBuffer:
             self._depth.append(depth.copy())
 
     def as_window(self) -> dict[str, np.ndarray]:
-        """(T, ...) 윈도우. 부족하면 **가장 오래된 것을 앞에 복제**해 채운다."""
+        """(T, ...) 윈도우. 부족하면 가장 오래된 것을 앞에 복제해 채운다."""
         if len(self) == 0:
             raise ValueError("Observation history is empty — append() at least once.")
 
@@ -141,11 +126,11 @@ class ObservationHistoryBuffer:
         return window
 
     def anchor_state(self) -> np.ndarray:
-        """앵커 = 히스토리의 **마지막** = 지금 내 자세. (10,) 절대 canonical.
+        """앵커 = 히스토리의 마지막 = 지금 내 자세. (10,) 절대 canonical.
 
-        ★ preprocessor 를 **통과시키기 전에** 뽑아야 한다 — 통과 후엔 relative 로 바뀌어
-          마지막 프레임이 항등(0,0,0,1,0,0,0,1,0)이 되어 앵커로 쓸 수 없다.
-          decode_policy_action 이 이 값을 받아 정책의 relative 출력을 절대로 되돌린다.
+        preprocessor 를 통과시키기 전에 뽑아야 한다. 통과 후엔 relative 로 바뀌어 마지막
+        프레임이 항등(0,0,0, 1,0,0, 0,1,0)이 되므로 앵커로 쓸 수 없다. decode_policy_action 이
+        이 값을 받아 정책의 relative 출력을 절대로 되돌린다.
         """
         if len(self) == 0:
             raise ValueError("Observation history is empty.")
@@ -157,16 +142,13 @@ def build_model_input(
 ) -> dict[str, torch.Tensor]:
     """윈도우(numpy) -> preprocessor 가 받는 텐서 dict.
 
-    ■ 학습 배치와 **같은 형태**여야 한다 (train == inference)
-        LeRobotDataset 이 주는 것 : 이미지 (3,H,W) float32 [0,1] · state (10,) float32
-        여기서 만드는 것          : 이미지 (1,T,3,H,W) float32 [0,1] · state (1,T,10) float32
-      즉 uint8 [0,255] -> float [0,1] 과 (H,W,C) -> (C,H,W) 를 여기서 한다.
-      데이터셋이 알아서 해주던 일을, 추론에선 우리가 해야 한다.
+    학습 배치와 같은 형태여야 한다. LeRobotDataset 은 이미지를 (3,H,W) float32 [0,1] 로, state 를
+    (10,) float32 로 준다. 여기서는 (1,T,3,H,W) 와 (1,T,10) 을 만든다. 즉 uint8 [0,255] ->
+    float [0,1] 과 (H,W,C) -> (C,H,W) 를 여기서 한다. 데이터셋이 해주던 일을 추론에선 우리가 한다.
 
-    ■ 배치축을 여기서 붙이는 이유
-      AddBatchDimensionProcessorStep 은 **1D state / 3D 이미지**일 때만 축을 붙인다
-      (batch_processor.py:104-114). 우리 윈도우는 이미 (T,10)/(T,H,W,3) 이라 그 조건에
-      안 걸린다 => 여기서 (1,T,...) 로 만들어 넘겨야 우리 step 이 ndim==3 을 본다.
+    배치축도 여기서 붙인다. AddBatchDimensionProcessorStep 은 1D state / 3D 이미지일 때만 축을
+    붙이는데(batch_processor.py:104-114) 우리 윈도우는 이미 (T,10)/(T,H,W,3) 이라 그 조건에
+    안 걸린다. 여기서 (1,T,...) 로 만들어야 우리 step 이 ndim==3 을 본다.
     """
     state = torch.from_numpy(np.asarray(window[OBS_STATE], dtype=np.float32)).unsqueeze(0)
     out: dict[str, torch.Tensor] = {OBS_STATE: state.to(device)}
