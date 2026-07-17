@@ -19,8 +19,8 @@ for other GPUs only the torch index URL changes.
 ### 1.1 Clone this repository
 
 ```bash
-git clone <this-repo-url> lerobot_share
-cd lerobot_share
+git clone git@github.com:qlOoOlp/lerobot_project.git
+cd lerobot_project
 ```
 
 ### 1.2 Clone lerobot and pin it to v0.4.4
@@ -179,10 +179,7 @@ lerobot-train \
     --output_dir=outputs/train/umidiffusion_pick_place_v4
 ```
 
-`--policy.push_to_hub=false` is required; the default is `true`, which demands a `policy.repo_id`
-and otherwise aborts. `--policy.use_depth=false` matches the Meta-World dataset, which has no depth.
-
-Loss should fall quickly — roughly 0.96 to 0.03 within the first epoch.
+`--policy.use_depth=false` matches the Meta-World dataset, which has no depth.
 
 To continue an interrupted or finished run, resume from a checkpoint. Passing a new `--steps`
 rebuilds the learning-rate schedule for the new total:
@@ -213,25 +210,8 @@ python custom/scripts/sim/rollout_metaworld.py \
 | `--gif-episodes` | 1 | Save the first N episodes as gifs. `0` disables. |
 | `--gif-dir` | `tmp/real` | Where to write them. |
 
-Use 20-30 episodes for any comparison. Ten episodes carry roughly ±15 percentage points of noise.
-
 Gif filenames do not encode any settings, so a second run overwrites the first — give each run its
 own `--gif-dir` when comparing. Encoding costs about 30 s per episode, so pass `--gif-episodes 0`
 when you only need the success rate.
 
-Run `--help` for the remaining options, which tune the canonical-to-action conversion and default to
-the verified configuration.
-
-### Expert control group
-
-The scripted expert drives the same environment through the same loop, so it isolates the policy from
-everything else. It should succeed on every episode; if it does not, the problem is the environment
-or the rollout loop rather than the policy.
-
-```bash
-python custom/scripts/sim/rollout_metaworld.py \
-    --checkpoint /dev/null --expert --n-episodes 10
-```
-
-Note that the expert bypasses the canonical-to-action conversion and issues environment actions
-directly. It therefore validates the environment, not the action mapping.
+Run `--help` for the remaining options.
