@@ -133,56 +133,27 @@ already ships a Meta-World environment.
 ## 3. Collecting Meta-World data
 
 Meta-World's scripted expert drives the environment; each frame is converted to the canonical schema
-and written as a `LeRobotDataset`.
+and written as a `LeRobotDataset`. Only successful episodes are stored, and runs are reproducible.
 
 ```bash
-MUJOCO_GL=egl python custom/scripts/sim/collect_metaworld.py \
+python custom/scripts/sim/collect_metaworld.py \
     --output-root ~/datasets/metaworld_canonical/pick_place_v4 \
     --n-episodes 300
 ```
 
-`MUJOCO_GL=egl` selects headless rendering. Only successful expert episodes are stored, and runs are
-reproducible — the same command produces the same dataset.
-
-### 3.1 Options
-
-Defaults are the verified configuration; the command above overrides only the output path and episode
-count.
-
-| Option | Default | Notes |
+| Option | Default | |
 |---|---|---|
 | `--output-root` | required | Where the dataset is written. |
-| `--n-episodes N` | 300 | Successful episodes to collect. Failed expert attempts are retried, not stored. |
-| `--overwrite` | off | Replace an existing output directory instead of aborting. |
-| `--env-task` | `pick-place-v3` | Meta-World task id. |
-| `--repo-id` | `local/metaworld_canonical_pick_place` | Dataset id recorded in the dataset. |
-| `--max-steps N` | 200 | Episode cap. Match this at rollout. |
+| `--n-episodes` | 300 | Successful episodes to collect. |
+| `--overwrite` | off | Replace an existing output directory. |
+| `--seed-base` | 100 | First reset seed. Keep >= 100 so evaluation seeds 0-9 stay held out. |
 
-### 3.2 Options that end up baked into the dataset
+Everything else defaults to the verified configuration: `pick-place-v3`, 240x240 images, 80 fps,
+gripper threshold 0.7, and 30% of episodes with noise injected into the expert's action to produce
+recovery states.
 
-Changing any of these means re-collecting, and rollout must be given the same values or the policy
-acts on a world it was not trained on — silently, with no error.
-
-| Option | Default | Notes |
-|---|---|---|
-| `--image-size N` | 240 | Image resolution. Training reads it from the dataset. |
-| `--gripper-threshold F` | 0.7 | `obs[3] >= F` counts as open. Task-dependent — measure it per task. |
-| `--fps N` | 80 | Label only; must match Meta-World's actual rate (`frame_skip 5 x 0.0025s`). |
-
-### 3.3 Seeding and noise
-
-| Option | Default | Notes |
-|---|---|---|
-| `--seed-base N` | 100 | First reset seed. Keep at 100 or above so evaluation seeds stay held out. |
-| `--noise-fraction F` | 0.3 | Fraction of episodes with Gaussian noise added to the expert's action. |
-| `--noise-std F` | 0.15 | Noise magnitude, in action units. |
-
-The noise injection is deliberate. It produces "drifted, then recovered" states that clean
-demonstrations never contain, which is what the policy needs in order to recover at rollout.
-
-The seed base matters more than it looks. Meta-World ignores `reset(seed=)` by design and picks
-object placement from the global RNG unless `seeded_rand_vec` is set, which the collection script
-does. Without it, `--seed-base` would do nothing and the evaluation seeds would not be held out.
+`--image-size` and `--gripper-threshold` are baked into the dataset. If you change either, pass the
+same value at rollout — a mismatch is silent, not an error.
 
 Inspect a dataset afterwards:
 
@@ -229,85 +200,38 @@ python -u -m lerobot.scripts.lerobot_train \
 Roll the trained policy out in Meta-World and measure its success rate.
 
 ```bash
-MUJOCO_GL=egl python custom/scripts/sim/rollout_metaworld.py \
+python custom/scripts/sim/rollout_metaworld.py \
     --checkpoint outputs/train/umidiffusion_pick_place_v4/checkpoints/030000/pretrained_model \
     --n-episodes 20
 ```
 
-`MUJOCO_GL=egl` selects headless rendering; without it the script looks for a display and fails.
-No window opens — results are printed and written to gifs.
-
-### 5.1 What to run
-
-| Option | Default | Notes |
+| Option | Default | |
 |---|---|---|
-| `--checkpoint` | required | Path to a `pretrained_model` directory. Use `/dev/null` with `--expert`. |
-| `--n-episodes N` | 20 | Episodes to run, using seeds `--seed` through `--seed + N - 1`. |
-| `--seed N` | 0 | First evaluation seed. Collection starts at 100, so 0–99 are held out. |
-| `--expert` | off | Run the scripted expert instead of the policy. See 5.3. |
+| `--checkpoint` | required | Path to a `pretrained_model` directory. |
+| `--n-episodes` | 20 | Episodes to run, using seeds `--seed` through `--seed + N - 1`. |
+| `--seed` | 0 | First evaluation seed. Collection starts at 100, so 0-99 are held out. |
+| `--gif-episodes` | 1 | Save the first N episodes as gifs. `0` disables. |
+| `--gif-dir` | `tmp/real` | Where to write them. |
 
-Use 20–30 episodes for any comparison. Ten episodes carry roughly ±15 percentage points of noise,
-which is wider than most differences worth measuring.
+Use 20-30 episodes for any comparison. Ten episodes carry roughly ±15 percentage points of noise.
 
-### 5.2 Saving gifs
+Gif filenames do not encode any settings, so a second run overwrites the first — give each run its
+own `--gif-dir` when comparing. Encoding costs about 30 s per episode, so pass `--gif-episodes 0`
+when you only need the success rate.
 
-The command above already writes one gif, because `--gif-episodes` defaults to 1.
+Run `--help` for the remaining options, which tune the canonical-to-action conversion and default to
+the verified configuration.
 
-| Option | Default | Notes |
-|---|---|---|
-| `--gif-episodes N` | 1 | Save the first N episodes. `0` disables saving. |
-| `--gif-dir PATH` | `tmp/real` | Where to write them. |
-
-Filenames are `rollout_<task>_<policy\|expert>_ep<N>.gif` and do not encode any settings, so a second
-run overwrites the first. When comparing configurations, give each run its own `--gif-dir`.
-
-Gif encoding costs more than the rollout itself — roughly 30 s per episode against a few seconds of
-simulation. Pass `--gif-episodes 0` when you only need the success rate.
-
-### 5.3 The expert control group
+### Expert control group
 
 The scripted expert drives the same environment through the same loop, so it isolates the policy from
 everything else. It should succeed on every episode; if it does not, the problem is the environment
 or the rollout loop rather than the policy.
 
 ```bash
-MUJOCO_GL=egl python custom/scripts/sim/rollout_metaworld.py \
+python custom/scripts/sim/rollout_metaworld.py \
     --checkpoint /dev/null --expert --n-episodes 10
 ```
 
 Note that the expert bypasses the canonical-to-action conversion and issues environment actions
 directly. It therefore validates the environment, not the action mapping.
-
-### 5.4 Options that must match collection
-
-These are baked into the dataset. A mismatch breaks the train/inference contract silently — no error,
-just a policy acting on a world it was not trained on.
-
-| Option | Default | Notes |
-|---|---|---|
-| `--env-task` | `pick-place-v3` | Must match the collected task. |
-| `--image-size N` | 240 | Must match the dataset resolution. |
-| `--gripper-threshold F` | 0.7 | Task-dependent, and baked into the dataset at collection. |
-| `--max-steps N` | 200 | Match collection so episode lengths are comparable. |
-
-### 5.5 Controller options
-
-These convert the policy's canonical pose targets into Meta-World's 4-D action. They affect inference
-only; the policy is untouched. Defaults are the verified configuration (90% on seeds 0–19 at 30k).
-
-| Option | Default | Notes |
-|---|---|---|
-| `--xyz-scale F` | 0.01 | The environment's `action_scale`. A constant, not something to fit to data. |
-| `--servo-gain F` | 1.0 | Resolved-rate P gain. 1.0 means Kp = 1/dt: null the error in one step. |
-| `--consume-steps N` | 0 | Actions executed per inference. 0 uses the policy's `n_action_steps` (8). |
-| `--lookahead N` | 0 | Aim N chunk entries ahead instead of at the next one. |
-| `--torch-seed N` | 42 | Diffusion sampling is stochastic; fix this for reproducible runs. |
-
-Lowering `--consume-steps` re-plans more often, which sounds safer but is not: the gripper needs
-several consecutive closing commands to actually grasp, and truncating the chunk drops them. Measured
-at 30k: 8 gives 90%, 4 gives 5%.
-
-`--lookahead` reduces path wander but removes the controller's ability to decelerate, because the aim
-point stays a fixed distance ahead however close the target is. Measured at 30k over 20 episodes:
-0 and 1 give 90%, 2 gives 60%, 4 gives 55%.
-
